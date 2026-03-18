@@ -1,1 +1,5 @@
-# apex-sniper-bot.
+ccxt
+pandas
+pandas-ta
+requests
+flask
