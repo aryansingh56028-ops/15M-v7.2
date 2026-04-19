@@ -1,5 +1,5 @@
 ccxt
 pandas
-pandas-ta
+numpy
 requests
-flask
+schedule
