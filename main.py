@@ -25,9 +25,6 @@ HOUSE_MONEY_MULTIPLIER = 1.5
 
 # ── Per-Symbol Config (🔄 INVERTED STRATEGY MULTIPLIERS) ──────────────────────
 PER_SYMBOL_CONFIG = {
-# ── Per-Symbol Config (🔄 INVERTED STRATEGY MULTIPLIERS) ──────────────────────
-# Format: 'Symbol': (SL_MULT, TP_MULT, TRAIL_DIST, P1_RISK, P2_RISK)
-PER_SYMBOL_CONFIG = {
     # ── Group 1: SL=0.50× | TP=3.00× | Trail=0.10× | P1=$30 | P2=$20 ─────────
     'ETH/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
     'OP/USDT:USDT':     (0.50, 3.00, 0.10, 30.0, 20.0),
@@ -395,7 +392,7 @@ def check_signal():
         struct_str = "BEARISH (Capitulation)" if smc_trend == -1 else "BULLISH (Greed Trap)"
         
         msg = (
-            f"<b>🤯 APEX v7.1 LIQUIDITY SWEEP</b>\n"
+            f"<b>🤯 APEX v7.2 LIQUIDITY SWEEP</b>\n"
             f"{'🟢 ▲ LONG' if long_signal else '🔴 ▼ SHORT'} "
             f"<b>{symbol.split('/')[0]}</b>  <i>[{grp} | Phase {CURRENT_PHASE}]</i>\n{hm_badge}\n\n"
             f"<b>Entry   :</b>  <code>{price:.6f}</code>\n"
@@ -419,8 +416,8 @@ def daily_reset():
 
 if __name__ == '__main__':
     send_telegram(
-        f"<b>🤯 APEX v7.1 (Inverted SMC) Online</b>\n"
-        "17 Symbols | Market Orders\n\n"
+        f"<b>🤯 APEX v7.2 (19 Symbols) Online</b>\n"
+        "19 Symbols | Market Orders\n\n"
         f"Kill-Switch ${DAILY_KILL_SWITCH}/day | Profit-Lock LIFTED 🚀\n"
         "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
         "🪤 LIQUIDITY SWEEP (SMC INVERSION) ACTIVE\n"
