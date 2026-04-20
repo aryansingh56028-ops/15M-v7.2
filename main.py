@@ -7,17 +7,17 @@ import time
 from datetime import datetime, timezone, date
 
 # ── Credentials & Config ───────────────────────────────────────────────────────
-BYBIT_API_KEY    = "FOqGNCN6gRxu4bqMqF"
-BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"
+BYBIT_API_KEY    = "jImaJiIeKBjAQW9z3W"
+BYBIT_API_SECRET = "YBinRS6gX355mnRmiRCCwo2rRVQUGMo3pgSu"
 
-TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"
+TELEGRAM_BOT_TOKEN = "8586984642:AAEMFum2ICKmwS1NF8XYmUNDxRdYN7aRJmY"
 TELEGRAM_CHAT_ID   = "1932328527"
 
 CURRENT_PHASE     = 1        
 DAILY_KILL_SWITCH = -150.0   
 DAILY_PROFIT_LOCK = +9999.0  # 🚀 LIFTED
 MAX_CONCURRENT    = 999
-FEE_CAP_FRAC      = 0.40     # 🎯 PATH D: 40% Pareto Sweet Spot
+FEE_CAP_FRAC      = 0.40     # 🎯 PATH D-PLUS: 40% Pareto Sweet Spot
 
 # 🔥 HOUSE MONEY CONFIGURATION
 HOUSE_MONEY_THRESHOLD  = 75.0  
@@ -27,6 +27,7 @@ HOUSE_MONEY_MULTIPLIER = 1.5
 PER_SYMBOL_CONFIG = {
     # ── Group 1: SL=0.50× | TP=3.00× | Trail=0.10× | P1=$30 | P2=$20 ─────────
     'ETH/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
+    'XRP/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),  # 🆕 PATH D-PLUS CHAMPION
     'OP/USDT:USDT':     (0.50, 3.00, 0.10, 30.0, 20.0),
     'SOL/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
     'ONDO/USDT:USDT':   (0.50, 3.00, 0.10, 30.0, 20.0),
@@ -44,7 +45,7 @@ PER_SYMBOL_CONFIG = {
     'PIPPIN/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
     'POL/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
     'DASH/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
-    'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0), # 🎯 NEW: High Quality
+    'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
@@ -253,12 +254,14 @@ def sync_open_positions():
 def manage_trailing_stops():
     if not open_positions: return
     for symbol, pos in list(open_positions.items()):
-        df = fetch_data(symbol, '15m', 5)
-        if df is None or len(df) < 2: continue
+        # ⚡ UPGRADE: Fetch 1-minute data instead of 15-minute to catch exact wicks
+        df = fetch_data(symbol, '1m', 5)
+        if df is None or len(df) < 1: continue
 
-        last_bar   = df.iloc[-2]
-        high_now   = float(last_bar['high'])
-        low_now    = float(last_bar['low'])
+        # ⚡ UPGRADE: Use iloc[-1] to track the LIVE breathing candle
+        live_bar   = df.iloc[-1]
+        high_now   = float(live_bar['high'])
+        low_now    = float(live_bar['low'])
         is_long    = pos['direction'] == 'LONG'
         trail_dist = pos['trail_mult'] * pos['atr']
 
@@ -290,6 +293,12 @@ def manage_trailing_stops():
                    f"<b>New SL :</b> <code>{fmt_new_sl}</code>\n<b>Locked :</b> <code>{locked:.4f} pts</code> {'above' if is_long else 'below'} entry\n")
             send_telegram(msg)
             print(f"  🔄 Trail SL {symbol.split('/')[0]} → {fmt_new_sl}", flush=True)
+
+# ── Fast Management Loop ───────────────────────────────────────────────────────
+def fast_management():
+    # ⚡ UPGRADE: Decoupled function runs every 1 minute
+    sync_open_positions()
+    manage_trailing_stops()
 
 # ── Signal Engine ──────────────────────────────────────────────────────────────
 def check_signal():
@@ -341,9 +350,7 @@ def check_signal():
         algo_short = (tL_curr < tL_prev) and (tL_prev >= tL_old)
 
         # 🤯 THE LIQUIDITY SWEEP (INVERTED SMC LOGIC):
-        # We only take LONG if SMC macro is BEARISH (-1) -> Buying the capitulation/fakeout
         long_signal  = algo_short and (smc_trend == -1)
-        # We only take SHORT if SMC macro is BULLISH (+1) -> Shorting the greedy breakout
         short_signal = algo_long and (smc_trend == 1)
 
         # Log ignored traps
@@ -415,16 +422,23 @@ def daily_reset():
 
 if __name__ == '__main__':
     send_telegram(
-        f"<b>🤯 APEX v7.2 PATH D (18 Symbols) Online</b>\n"
-        "18 Symbols | Market Orders\n\n"
+        f"<b>🤯 APEX v7.2 PATH D-PLUS (19 Symbols | 1m Fast-Trail) Online</b>\n"
+        "19 Symbols | Market Orders\n\n"
         f"Kill-Switch ${DAILY_KILL_SWITCH}/day | Profit-Lock LIFTED 🚀\n"
         "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
         "🪤 LIQUIDITY SWEEP (SMC INVERSION) ACTIVE\n"
-        f"🔥 HOUSE MONEY (1.5x) ACTIVE"
+        f"🔥 HOUSE MONEY (1.5x) ACTIVE\n"
+        "⚡ 1-Minute Live Fast-Trailing Engine ENGAGED"
     )
     check_signal()
+    
+    # ⚡ UPGRADE: The Decoupled 1-Minute Position Loop
+    schedule.every(1).minutes.do(fast_management)
+    
+    # The Original 5-Minute Entry Loop
     schedule.every(5).minutes.at(":00").do(check_signal)
     schedule.every().day.at("00:05").do(daily_reset)
+    
     while True:
         try: schedule.run_pending()
         except Exception as e: print(f"  [loop error] {e}", flush=True)
