@@ -17,7 +17,7 @@ CURRENT_PHASE     = 1
 DAILY_KILL_SWITCH = -150.0   
 DAILY_PROFIT_LOCK = +9999.0  # 🚀 LIFTED
 MAX_CONCURRENT    = 999
-FEE_CAP_FRAC      = 0.30     
+FEE_CAP_FRAC      = 0.40     # 🎯 PATH D: 40% Pareto Sweet Spot
 
 # 🔥 HOUSE MONEY CONFIGURATION
 HOUSE_MONEY_THRESHOLD  = 75.0  
@@ -44,7 +44,6 @@ PER_SYMBOL_CONFIG = {
     'PIPPIN/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
     'POL/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
     'DASH/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
-    'HYPE/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0), # 🛡️ NEW: Trade Spreader
     'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0), # 🎯 NEW: High Quality
 }
 
@@ -416,8 +415,8 @@ def daily_reset():
 
 if __name__ == '__main__':
     send_telegram(
-        f"<b>🤯 APEX v7.2 (19 Symbols) Online</b>\n"
-        "19 Symbols | Market Orders\n\n"
+        f"<b>🤯 APEX v7.2 PATH D (18 Symbols) Online</b>\n"
+        "18 Symbols | Market Orders\n\n"
         f"Kill-Switch ${DAILY_KILL_SWITCH}/day | Profit-Lock LIFTED 🚀\n"
         "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
         "🪤 LIQUIDITY SWEEP (SMC INVERSION) ACTIVE\n"
