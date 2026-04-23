@@ -29,15 +29,15 @@ HOUSE_MONEY_MULTIPLIER = 1.5
 # ── Per-Symbol Config (🔄 INVERTED STRATEGY MULTIPLIERS) ──────────────────────
 PER_SYMBOL_CONFIG = {
     # ── Group 1: SL=0.50× | TP=3.00× | Trail=0.10× | P1=$30 | P2=$20 ─────────
-    'ETH/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
-    'XRP/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),  # 🆕 PATH D-PLUS CHAMPION
-    'OP/USDT:USDT':     (0.50, 3.00, 0.10, 30.0, 20.0),
-    'SOL/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
-    'ONDO/USDT:USDT':   (0.50, 3.00, 0.10, 30.0, 20.0),
-    'ZEC/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
-    'LTC/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
-    'ADA/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
-    'LINK/USDT:USDT':   (0.50, 3.00, 0.10, 30.0, 20.0),
+    'ETH/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
+    'XRP/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),  # 🆕 PATH D-PLUS CHAMPION
+    'OP/USDT:USDT':     (1.00, 3.00, 0.10, 30.0, 20.0),
+    'SOL/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
+    'ONDO/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
+    'ZEC/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
+    'LTC/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
+    'ADA/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
+    'LINK/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
     # ── Group 2: SL=0.45× | TP=4.00× | Trail=0.10× | P1=$35 | P2=$25 ─────────
     'RIVER/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0),
     'RENDER/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
