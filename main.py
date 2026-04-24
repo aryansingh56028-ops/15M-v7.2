@@ -343,7 +343,7 @@ if __name__ == '__main__':
         schedule.every().hour.at(t).do(check_signals)
 
     while True:
-        # This keeps the logs moving every minute so Railway knows you're alive
+        # Keep logs moving every minute so Railway knows you're alive
         if datetime.now().second == 0:
             print(f"[HEARTBEAT] {datetime.now().strftime('%H:%M')} - Bot is active...", flush=True)
             
@@ -352,5 +352,4 @@ if __name__ == '__main__':
         except Exception as e:
             log(f"Error: {e}", "LOOP")
             
-              time.sleep(1)
-
+        time.sleep(1)
