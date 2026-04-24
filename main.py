@@ -6,32 +6,12 @@ import schedule
 import time
 from datetime import datetime, timezone, date
 
-# ── Credentials & Config (DEMO KEYS INTEGRATED) ────────────────────────────────
-BYBIT_API_KEY    = "uaYuCtuHQrPj6vuKEi"
-BYBIT_API_SECRET = "Y2aouZ6fGHv9AqWgNl9WdqWLKTEZlP8OqVCe"
+# ── Credentials & Config (V7.2 KEYS) ───────────────────────────────────────────
+BYBIT_API_KEY    = "FOqGNCN6gRxu4bqMqF"      
+BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"   
 
-TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"
+TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"  
 TELEGRAM_CHAT_ID   = "1932328527"               
-
-
-# ── Updated Exchange Setup ─────────────────────────────────────────────────────
-exchange = ccxt.bybit({
-    'apiKey': BYBIT_API_KEY,
-    'secret': BYBIT_API_SECRET,
-    'enableRateLimit': True,
-    'options': {
-        'defaultType': 'swap',
-    },
-})
-
-# IMPORTANT: Setting sandbox mode BEFORE loading markets
-exchange.set_sandbox_mode(True) 
-
-try:
-    exchange.load_markets()
-    print("✅ Successfully connected to Bybit Demo Servers")
-except Exception as e:
-    print(f"❌ Connection Failed: {e}")
 
 CURRENT_PHASE     = 1        
 DAILY_KILL_SWITCH = -150.0   
@@ -43,7 +23,7 @@ FEE_CAP_FRAC      = 0.40
 HOUSE_MONEY_THRESHOLD  = 75.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
 
-# ── Per-Symbol Config (RESTORED PREVIOUS SETTINGS) ─────────────────────────────
+# ── Per-Symbol Config (RESTORED TO YOUR PREVIOUS SETTINGS) ─────────────────────
 PER_SYMBOL_CONFIG = {
     # ── Group 1: Custom SL | TP=3.00× | Trail=0.10× | P1=$30 | P2=$20 ─────────
     'ETH/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
@@ -67,188 +47,396 @@ PER_SYMBOL_CONFIG = {
     'PIPPIN/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
     'POL/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
     'DASH/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
-    'JASMY/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0), # Group 2 Active
+    'JASMY/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0),
     'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
 
-# ── AlgoAlpha Indicator Constants ──────────────────────────────────────────────
+# ── AlgoAlpha Indicator Constants (v7.2 APEX OPTIMAL) ──────────────────────────
 ST_FACTOR  = 2.0    
 ST_PERIOD  = 14     
 WMA_LENGTH = 14     
 EMA_LENGTH = 3      
 ATR_PERIOD = 14     
+
 BYBIT_TAKER_FEE = 0.00055  
 
 # ── Runtime State ──────────────────────────────────────────────────────────────
 open_positions       = {}
 daily_pnl_tracker    = {}
+profit_lock_notified = {}  
 last_trade_bar       = {}  
 
-# ── Exchange Setup ─────────────────────────────────────────────────────────────
+# ── Exchange ───────────────────────────────────────────────────────────────────
 exchange = ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
     'options': {'defaultType': 'swap'},
 })
-exchange.set_sandbox_mode(True) # Verified for Demo Use
+
+# NOTE: If your keys are for REAL money trading, comment out the line below.
+exchange.enable_demo_trading(True) 
 exchange.load_markets()
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': text.strip(), 'parse_mode': 'HTML'}, timeout=10)
+        requests.post(
+            url,
+            json={'chat_id': TELEGRAM_CHAT_ID, 'text': text.strip(), 'parse_mode': 'HTML'},
+            timeout=10,
+        )
     except Exception as e:
         print(f"  [Telegram error] {e}")
 
-# ── Indicators & Core Logic ────────────────────────────────────────────────────
+# ── Safety Check Helpers ───────────────────────────────────────────────────────
+def is_kill_switch_active() -> bool:
+    today = date.today()
+    return daily_pnl_tracker.get(today, 0.0) <= DAILY_KILL_SWITCH
+
+def is_profit_lock_active() -> bool:
+    today = date.today()
+    return daily_pnl_tracker.get(today, 0.0) >= DAILY_PROFIT_LOCK
+
+def record_closed_pnl(pnl_usd: float):
+    today = date.today()
+    daily_pnl_tracker[today] = daily_pnl_tracker.get(today, 0.0) + pnl_usd
+
+# ── Indicators ─────────────────────────────────────────────────────────────────
 def fetch_data(symbol, timeframe='15m', limit=300):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
-        for c in ['open', 'high', 'low', 'close']: df[c] = df[c].astype(float)
+        for c in ['open', 'high', 'low', 'close']:
+            df[c] = df[c].astype(float)
         return df
     except Exception as e:
+        print(f"  [fetch_data error {symbol}] {e}")
         return None
 
-def rma(series, length): return series.ewm(alpha=1/length, adjust=False).mean()
+def rma(series, length):
+    return series.ewm(alpha=1/length, adjust=False).mean()
 
 def calc_atr(df, length):
     prev_close = df['close'].shift(1)
-    tr = pd.concat([df['high'] - df['low'], (df['high'] - prev_close).abs(), (df['low']  - prev_close).abs()], axis=1).max(axis=1)
+    tr = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - prev_close).abs(),
+        (df['low']  - prev_close).abs(),
+    ], axis=1).max(axis=1)
     return rma(tr, length)
 
 def calc_wma(series, length):
     weights = np.arange(1, length + 1)
-    return series.rolling(length).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+    return series.rolling(length).apply(
+        lambda x: np.dot(x, weights) / weights.sum(), raw=True
+    )
 
 def algoalpha_baseline(df):
     st_atr = calc_atr(df, ST_PERIOD)
     hl2    = (df['high'] + df['low']) / 2
     basic_upper = hl2 + ST_FACTOR * st_atr
     basic_lower = hl2 - ST_FACTOR * st_atr
-    upper, lower = np.zeros(len(df)), np.zeros(len(df))
+
+    upper = np.zeros(len(df))
+    lower = np.zeros(len(df))
     close = df['close'].values
-    upper[0], lower[0] = basic_upper.iloc[0], basic_lower.iloc[0]
+
+    upper[0] = basic_upper.iloc[0]
+    lower[0] = basic_lower.iloc[0]
+
     for i in range(1, len(df)):
         lower[i] = (basic_lower.iloc[i] if (basic_lower.iloc[i] > lower[i-1] or close[i-1] < lower[i-1]) else lower[i-1])
         upper[i] = (basic_upper.iloc[i] if (basic_upper.iloc[i] < upper[i-1] or close[i-1] > upper[i-1]) else upper[i-1])
-    mid_line = (pd.Series(lower, index=df.index) + pd.Series(upper, index=df.index)) / 2.0
-    return calc_wma(mid_line, WMA_LENGTH).ewm(span=EMA_LENGTH, adjust=False).mean()
 
+    mid_line = (pd.Series(lower, index=df.index) + pd.Series(upper, index=df.index)) / 2.0
+    wma_line = calc_wma(mid_line, WMA_LENGTH)
+    tL       = wma_line.ewm(span=EMA_LENGTH, adjust=False).mean()
+    return tL
+
+# 🏹 SMC STRUCTURAL TREND ENGINE
 def calc_smc_structure(df):
-    right, window = 3, 7
-    df['last_swing_high'] = pd.Series(np.where(df['high'].shift(right) == df['high'].rolling(window=window).max(), df['high'].shift(right), np.nan)).ffill()
-    df['last_swing_low'] = pd.Series(np.where(df['low'].shift(right) == df['low'].rolling(window=window).min(), df['low'].shift(right), np.nan)).ffill()
+    right = 3
+    window = 7
+    
+    roll_max = df['high'].rolling(window=window).max()
+    is_swing_high = df['high'].shift(right) == roll_max
+    swing_high_vals = np.where(is_swing_high, df['high'].shift(right), np.nan)
+    df['last_swing_high'] = pd.Series(swing_high_vals).ffill()
+    
+    roll_min = df['low'].rolling(window=window).min()
+    is_swing_low = df['low'].shift(right) == roll_min
+    swing_low_vals = np.where(is_swing_low, df['low'].shift(right), np.nan)
+    df['last_swing_low'] = pd.Series(swing_low_vals).ffill()
+
+    bullish_break = (df['close'] > df['last_swing_high'])
+    bearish_break = (df['close'] < df['last_swing_low'])
+    
     trend = pd.Series(np.nan, index=df.index)
-    trend.loc[df['close'] > df['last_swing_high']] = 1   
-    trend.loc[df['close'] < df['last_swing_low']] = -1  
+    trend.loc[bullish_break] = 1   
+    trend.loc[bearish_break] = -1  
     df['smc_trend'] = trend.ffill().fillna(0)
+    
     return df
 
-# ── Trade Execution ────────────────────────────────────────────────────────────
+# ── Execution ──────────────────────────────────────────────────────────────────
 def calculate_lot_size(symbol, entry_price, sl_price, risk_usd):
-    dist = abs(entry_price - sl_price)
-    return risk_usd / dist if dist != 0 else 0
+    sl_distance = abs(entry_price - sl_price)
+    if sl_distance == 0: return 0
+    return risk_usd / sl_distance
 
 def execute_trade(symbol, direction, size, entry, sl, tp):
     side = 'buy' if direction == 'LONG' else 'sell'
     try:
-        fmt_size, fmt_sl, fmt_tp = float(exchange.amount_to_precision(symbol, size)), float(exchange.price_to_precision(symbol, sl)), float(exchange.price_to_precision(symbol, tp))
-        order = exchange.create_order(symbol=symbol, type='market', side=side, amount=fmt_size,
-            params={'stopLoss': str(fmt_sl), 'takeProfit': str(fmt_tp), 'tpslMode': 'Full'})
+        fmt_size = float(exchange.amount_to_precision(symbol, size))
+        fmt_sl   = float(exchange.price_to_precision(symbol, sl))
+        fmt_tp   = float(exchange.price_to_precision(symbol, tp))
+
+        order = exchange.create_order(
+            symbol=symbol, type='market', side=side, amount=fmt_size,
+            params={'stopLoss': str(fmt_sl), 'takeProfit': str(fmt_tp), 'tpslMode': 'Full',
+                    'slOrderType': 'Market', 'tpOrderType': 'Market',
+                    'tpTriggerBy': 'LastPrice', 'slTriggerBy': 'LastPrice'}
+        )
         return order, fmt_size, fmt_sl, fmt_tp
     except Exception as e:
-        send_telegram(f"❌ Execution Failed ({symbol}): {e}")
+        err = f"❌ Bybit Execution Failed ({symbol}): {e}"
+        print(err)
+        send_telegram(err)
         return None, None, None, None
 
 def modify_bybit_tpsl(symbol, direction, new_sl, current_tp):
+    market_id  = exchange.market(symbol)['id']
+    bybit_side = 'Buy' if direction == 'LONG' else 'Sell'
     try:
         fmt_sl = float(exchange.price_to_precision(symbol, new_sl))
         exchange.privatePostV5PositionTradingStop({
-            'category': 'linear', 'symbol': exchange.market(symbol)['id'], 'side': 'Buy' if direction == 'LONG' else 'Sell',
-            'takeProfit': str(current_tp), 'stopLoss': str(fmt_sl), 'slOrderType': 'Market'
+            'category': 'linear', 'symbol': market_id, 'side': bybit_side, 'tpslMode': 'Full',
+            'takeProfit': str(current_tp), 'stopLoss': str(fmt_sl), 'slOrderType': 'Market',
+            'tpOrderType': 'Market', 'slTriggerBy': 'LastPrice', 'tpTriggerBy': 'LastPrice'
         })
         return fmt_sl
-    except: return None
+    except Exception as e:
+        print(f"  [Bybit modify SL error {symbol}] {e}")
+        return None
 
-# ── Management Logic ───────────────────────────────────────────────────────────
+# ── Position Management ────────────────────────────────────────────────────────
 def sync_open_positions():
     if not open_positions: return
     try:
         live_positions = exchange.fetch_positions()
         live_syms = {p['symbol'] for p in live_positions if float(p.get('contracts', 0)) > 0}
-        for sym in [s for s in list(open_positions.keys()) if s not in live_syms]:
+        closed = [sym for sym in list(open_positions.keys()) if sym not in live_syms]
+
+        for sym in closed:
             pos = open_positions.pop(sym)
-            res = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': exchange.market(sym)['id'], 'limit': 1})
-            pnl = float(res.get('result', {}).get('list', [{}])[0].get('closedPnl', 0.0))
-            daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + pnl
-            send_telegram(f"{'✅' if pnl > 0 else '❌'} <b>CLOSED {sym.split('/')[0]}</b>\nNet PnL: <code>${pnl:.2f}</code>")
-    except Exception as e: print(f"Sync error: {e}")
+            market_id = exchange.market(sym)['id']
+            try:
+                response = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': market_id, 'limit': 1})
+                records = response.get('result', {}).get('list', [])
+                if records:
+                    exact_pnl = float(records[0].get('closedPnl', 0.0))
+                    record_closed_pnl(exact_pnl)
+                    emoji = "✅" if exact_pnl > 0 else "❌"
+                    msg = f"{emoji} <b>TRADE CLOSED — {sym.split('/')[0]}</b>\nSettled Net PnL: <code>${exact_pnl:.2f}</code>"
+                    send_telegram(msg)
+                    print(f"  ℹ️  {sym.split('/')[0]} closed. Settled PnL: ${exact_pnl:.2f}")
+                else:
+                    send_telegram(f"ℹ️ <b>TRADE CLOSED — {sym.split('/')[0]}</b>\n(PnL syncing in background)")
+                    print(f"  ℹ️  {sym.split('/')[0]} closed. (No PnL record found)")
+            except Exception as e:
+                print(f"  [PnL fetch error {sym.split('/')[0]}] {e}", flush=True)
+    except Exception as e:
+        print(f"  [sync_positions error] {e}", flush=True)
 
 def manage_trailing_stops():
+    if not open_positions: return
     for symbol, pos in list(open_positions.items()):
         df = fetch_data(symbol, '1m', 5)
         if df is None or len(df) < 1: continue
-        live = df.iloc[-1]
-        is_long = pos['direction'] == 'LONG'
-        new_best = max(pos['best_price'], float(live['high'])) if is_long else min(pos['best_price'], float(live['low']))
+
+        live_bar   = df.iloc[-1]
+        high_now   = float(live_bar['high'])
+        low_now    = float(live_bar['low'])
+        live_price = float(live_bar['close'])
+        
+        is_long    = pos['direction'] == 'LONG'
+        trail_dist = pos['trail_mult'] * pos['atr']
+
+        new_best = max(pos['best_price'], high_now) if is_long else min(pos['best_price'], low_now)
         pos['best_price'] = new_best
-        
-        profit_dist = abs(new_best - pos['entry'])
-        if profit_dist >= (1.0 * pos['atr']) and not pos.get('free_ride', False):
-            pos['free_ride'] = True
-            send_telegram(f"🛡️ <b>FREE RIDE — {symbol.split('/')[0]}</b>")
+        profit_distance = abs(new_best - pos['entry'])
 
-        if profit_dist < (1.0 * pos['atr']): continue
-        
-        raw_sl = (new_best - (pos['trail_mult'] * pos['atr'])) if is_long else (new_best + (pos['trail_mult'] * pos['atr']))
-        if (is_long and raw_sl > pos['current_sl']) or (not is_long and raw_sl < pos['current_sl']):
-            fmt_sl = modify_bybit_tpsl(symbol, pos['direction'], raw_sl, pos['catastrophic_tp'])
-            if fmt_sl: pos['current_sl'] = fmt_sl
+        if profit_distance >= (1.0 * pos['atr']) and not pos.get('free_ride_triggered', False):
+            pos['free_ride_triggered'] = True
+            send_telegram(f"🛡️ <b>FREE RIDE SECURED — {symbol.split('/')[0]}</b>\nTrade reached +1.0× ATR.")
 
-# ── Main Loop ──────────────────────────────────────────────────────────────────
+        soft_tp_dist = pos['tp_mult'] * pos['atr']
+        if profit_distance >= soft_tp_dist and not pos.get('trailing_tp_triggered', False):
+            pos['trailing_tp_triggered'] = True
+            send_telegram(f"🚀 <b>TRAILING TP ACTIVATED — {symbol.split('/')[0]}</b>\nTarget smashed! Uncapped 0.10x trail active.")
+
+        if profit_distance < (1.0 * pos['atr']): continue
+
+        raw_new_sl  = (new_best - trail_dist) if is_long else (new_best + trail_dist)
+        sl_improved = raw_new_sl > pos['current_sl'] if is_long else raw_new_sl < pos['current_sl']
+
+        if not sl_improved: continue
+
+        if is_long and raw_new_sl >= live_price:
+            continue  
+        if not is_long and raw_new_sl <= live_price:
+            continue  
+
+        fmt_new_sl = modify_bybit_tpsl(symbol, pos['direction'], raw_new_sl, pos['catastrophic_tp'])
+        if fmt_new_sl:
+            pos['current_sl'] = fmt_new_sl
+            locked = abs(fmt_new_sl - pos['entry'])
+            msg = (f"<b>🔄 Trail Updated — {symbol.split('/')[0]}</b>\n{'▲' if is_long else '▼'} {pos['direction']}\n"
+                   f"<b>New SL :</b> <code>{fmt_new_sl}</code>\n<b>Locked :</b> <code>{locked:.4f} pts</code> {'above' if is_long else 'below'} entry\n")
+            send_telegram(msg)
+            print(f"  🔄 Trail SL {symbol.split('/')[0]} → {fmt_new_sl}", flush=True)
+
+# ── Fast Management Loop ───────────────────────────────────────────────────────
+def fast_management():
+    sync_open_positions()
+    manage_trailing_stops()
+
+# ── Signal Engine ──────────────────────────────────────────────────────────────
 def check_signal():
-    today_pnl = daily_pnl_tracker.get(date.today(), 0.0)
-    if today_pnl <= DAILY_KILL_SWITCH: return
+    ts_now    = datetime.now(timezone.utc)
+    today     = ts_now.date()
+    today_pnl = daily_pnl_tracker.get(today, 0.0)
+
+    print(f"[{ts_now.strftime('%H:%M UTC')}] Bybit Demo (15m) | PnL: ${today_pnl:.2f} | Open: {len(open_positions)}/{MAX_CONCURRENT}", flush=True)
+
+    if is_kill_switch_active():
+        print(f"  🛑 KILL-SWITCH ACTIVE — daily PnL ${today_pnl:.2f} <= ${DAILY_KILL_SWITCH}.", flush=True)
+        manage_trailing_stops()
+        return
 
     sync_open_positions()
     manage_trailing_stops()
 
-    for symbol in SYMBOLS:
-        if symbol in open_positions or len(open_positions) >= MAX_CONCURRENT: continue
-        df = fetch_data(symbol, '15m', 200)
-        if df is None or len(df) < 150: continue
-        
-        df['atr'] = calc_atr(df, ATR_PERIOD)
-        df['tL']  = algoalpha_baseline(df)
-        df = calc_smc_structure(df)
-        
-        c, p, o = df.iloc[-2], df.iloc[-3], df.iloc[-4]
-        price, atr, trend = float(df.iloc[-1]['close']), float(c['atr']), int(c['smc_trend'])
-        
-        long_sig = (c['tL'] < p['tL']) and (p['tL'] >= o['tL']) and trend == -1
-        short_sig = (c['tL'] > p['tL']) and (p['tL'] <= o['tL']) and trend == 1
+    if len(open_positions) >= MAX_CONCURRENT:
+        print(f"  ⏸  Max {MAX_CONCURRENT} concurrent positions reached.", flush=True)
+        return
 
-        if long_sig or short_sig:
-            sl_m, tp_m, tr_m, p1, p2 = PER_SYMBOL_CONFIG[symbol]
-            risk = (p1 if CURRENT_PHASE == 1 else p2) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
-            
-            side = 'LONG' if long_sig else 'SHORT'
-            sl_price = price - sl_m * atr if long_sig else price + sl_m * atr
-            
-            order, sz, fsl, ftp = execute_trade(symbol, side, calculate_lot_size(symbol, price, sl_price, risk), price, sl_price, (price + 10*atr if long_sig else price - 10*atr))
-            if order:
-                open_positions[symbol] = {'direction': side, 'entry': price, 'atr': atr, 'best_price': price, 'current_sl': fsl, 'catastrophic_tp': ftp, 'trail_mult': tr_m, 'tp_mult': tp_m}
-                send_telegram(f"<b>🚀 {side} {symbol.split('/')[0]}</b>\nEntry: {price}\nRisk: ${risk:.0f}")
+    for symbol in SYMBOLS:
+        if len(open_positions) >= MAX_CONCURRENT: break
+        if symbol in open_positions: continue
+
+        df_15m = fetch_data(symbol, '15m', 250)
+        if df_15m is None or len(df_15m) < 150: continue
+
+        df_15m['atr_14'] = calc_atr(df_15m, ATR_PERIOD)
+        df_15m['tL']     = algoalpha_baseline(df_15m)
+        df_15m           = calc_smc_structure(df_15m)
+
+        c15m  = df_15m.iloc[-2]
+        price = float(df_15m.iloc[-1]['close'])   
+        atr   = float(c15m['atr_14'])
+        smc_trend = int(c15m['smc_trend'])
+        
+        signal_bar_ts = int(c15m['ts'])
+        if last_trade_bar.get(symbol) == signal_bar_ts: continue
+        if atr < (price * 0.00005) or np.isnan(atr): continue
+
+        tL_curr = float(df_15m['tL'].iloc[-2])
+        tL_prev = float(df_15m['tL'].iloc[-3])
+        tL_old  = float(df_15m['tL'].iloc[-4])
+
+        algo_long  = (tL_curr > tL_prev) and (tL_prev <= tL_old)
+        algo_short = (tL_curr < tL_prev) and (tL_prev >= tL_old)
+
+        # ─── INVERTED LOGIC (100% PARITY WITH PINE SCRIPT) ───
+        long_signal  = algo_short and (smc_trend == -1)
+        short_signal = algo_long and (smc_trend == 1)
+
+        if not long_signal and not short_signal: continue
+
+        sl_mult, tp_mult, trail_mult, p1_risk, p2_risk = PER_SYMBOL_CONFIG[symbol]
+        base_risk_usd = p1_risk if CURRENT_PHASE == 1 else p2_risk
+        
+        # Determine Group logic strictly for display strings
+        grp = 'G2' if sl_mult == 0.45 else 'G1'
+
+        if today_pnl >= HOUSE_MONEY_THRESHOLD:
+            risk_usd = base_risk_usd * HOUSE_MONEY_MULTIPLIER
+            hm_active = True
+        else:
+            risk_usd = base_risk_usd
+            hm_active = False
+
+        direction = 'LONG' if long_signal else 'SHORT'
+        
+        # SL clamped logic removed - direct multiplication used
+        raw_sl    = price - sl_mult * atr if long_signal else price + sl_mult * atr
+        catastrophic_tp = price + 10.0 * atr if long_signal else price - 10.0 * atr
+
+        raw_lot_size = calculate_lot_size(symbol, price, raw_sl, risk_usd)
+        estimated_fee_usd  = raw_lot_size * price * BYBIT_TAKER_FEE * 2  
+        
+        if estimated_fee_usd > (risk_usd * FEE_CAP_FRAC):
+            print(f"  ⏭️ {symbol.split('/')[0]:<10} | SKIP: SL too tight. Fee > {int(FEE_CAP_FRAC*100)}%.", flush=True)
+            continue
+
+        order, fmt_size, fmt_sl, fmt_tp = execute_trade(symbol, direction, raw_lot_size, price, raw_sl, catastrophic_tp)
+        if not order: continue
+
+        last_trade_bar[symbol] = signal_bar_ts
+        open_positions[symbol] = {
+            'direction': direction, 'entry': price, 'atr': atr, 'best_price': price,
+            'current_sl': fmt_sl, 'catastrophic_tp': fmt_tp, 'trail_mult': trail_mult,
+            'tp_mult': tp_mult, 'size': fmt_size, 'free_ride_triggered': False, 'trailing_tp_triggered': False
+        }
+
+        hm_badge = "🔥 <b>[HOUSE MONEY ACTIVE]</b>" if hm_active else ""
+        struct_str = "BEARISH (Inverted Trap)" if smc_trend == -1 else "BULLISH (Inverted Trap)"
+        
+        msg = (
+            f"<b>🔄 APEX SANDBOX (V7.2.8 INVERTED PARITY)</b>\n"
+            f"{'🟢 ▲ LONG' if long_signal else '🔴 ▼ SHORT'} "
+            f"<b>{symbol.split('/')[0]}</b>  <i>[{grp} | Phase {CURRENT_PHASE}]</i>\n{hm_badge}\n\n"
+            f"<b>Entry   :</b>  <code>{price:.6f}</code>\n"
+            f"<b>SL      :</b>  <code>{fmt_sl}</code>  <i>({sl_mult}× ATR)</i>\n"
+            f"<b>Target  :</b>  Uncapped 🚀 <i>({tp_mult}×)</i>\n"
+            f"<b>SMC Logic :</b> ✅ <code>{struct_str}</code>\n"
+            f"<b>Size    :</b>  <code>{fmt_size}</code>\n"
+            f"<b>Est. Fee:</b>  <code>~${estimated_fee_usd:.2f}</code>\n"
+            f"<b>Risk    :</b>  ${risk_usd:.0f}\n"
+            f"<b>Open    :</b>  {len(open_positions)}/{MAX_CONCURRENT}"
+        )
+        send_telegram(msg)
+        print(f"  ✅ {direction} {symbol.split('/')[0]:<10} | Entry={price:.6f} | SMC={struct_str} | Risk=${risk_usd:.0f}", flush=True)
+
+def daily_reset():
+    yesterday = datetime.now(timezone.utc).date()
+    final_pnl = daily_pnl_tracker.get(yesterday, 0.0)
+    send_telegram(f"<b>📅 Daily Reset</b>\nYesterday PnL: <code>${final_pnl:.2f}</code>\nKill-switch was {'🛑 ACTIVE' if final_pnl <= DAILY_KILL_SWITCH else '✅ NOT triggered'}")
+    daily_pnl_tracker.clear()
+    profit_lock_notified.clear()
 
 if __name__ == '__main__':
-    send_telegram("<b>🔄 APEX SANDBOX V7.2.8 ONLINE</b>\nDemo Mode Enabled")
-    schedule.every(1).minutes.do(lambda: (sync_open_positions(), manage_trailing_stops()))
+    send_telegram(
+        f"<b>🔄 APEX SANDBOX (V7.2.8) Online</b>\n"
+        "21 Symbols | Market Orders\n\n"
+        f"Kill-Switch ${DAILY_KILL_SWITCH}/day | Profit-Lock LIFTED 🚀\n"
+        "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
+        "🔀 EXECUTION ALIGNED (INVERTED PARITY)\n"
+        f"🔥 HOUSE MONEY (1.5x) ACTIVE\n"
+        "⚡ 1-Minute Live Fast-Trailing Engine ENGAGED"
+    )
+    check_signal()
+    
+    schedule.every(1).minutes.do(fast_management)
     schedule.every(5).minutes.at(":00").do(check_signal)
+    schedule.every().day.at("00:05").do(daily_reset)
+    
     while True:
-        schedule.run_pending()
+        try: schedule.run_pending()
+        except Exception as e: print(f"  [loop error] {e}", flush=True)
         time.sleep(1)
