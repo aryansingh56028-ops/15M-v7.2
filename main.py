@@ -13,6 +13,26 @@ BYBIT_API_SECRET = "Y2aouZ6fGHv9AqWgNl9WdqWLKTEZlP8OqVCe"
 TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"
 TELEGRAM_CHAT_ID   = "1932328527"               
 
+
+# ── Updated Exchange Setup ─────────────────────────────────────────────────────
+exchange = ccxt.bybit({
+    'apiKey': BYBIT_API_KEY,
+    'secret': BYBIT_API_SECRET,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'swap',
+    },
+})
+
+# IMPORTANT: Setting sandbox mode BEFORE loading markets
+exchange.set_sandbox_mode(True) 
+
+try:
+    exchange.load_markets()
+    print("✅ Successfully connected to Bybit Demo Servers")
+except Exception as e:
+    print(f"❌ Connection Failed: {e}")
+
 CURRENT_PHASE     = 1        
 DAILY_KILL_SWITCH = -150.0   
 DAILY_PROFIT_LOCK = +9999.0  
