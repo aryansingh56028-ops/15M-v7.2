@@ -303,6 +303,7 @@ def check_signals():
     if is_halted() or (len(open_positions) + len(pending_orders) >= MAX_CONCURRENT): return
     
     for sym in SYMBOLS:
+        # Prevent duplicate trades: skip if already in open_positions or pending_orders
         if sym in open_positions or sym in pending_orders: 
             continue
         
@@ -339,14 +340,11 @@ if __name__ == '__main__':
     send_telegram("🚀 <b>APEX SNIPER v7.2.9 PRO — ONLINE</b>\nSystem is monitoring markets and awaiting entry signals.")
 
     schedule.every(15).seconds.do(fast_management)
-    for t in [":00", ":15", ":30", ":45"]:
-        schedule.every().hour.at(t).do(check_signals)
+    
+    # Change: Scan coins every 5 minutes
+    schedule.every(5).minutes.do(check_signals)
 
     while True:
-        # Keep logs moving every minute so Railway knows you're alive
-        if datetime.now().second == 0:
-            print(f"[HEARTBEAT] {datetime.now().strftime('%H:%M')} - Bot is active...", flush=True)
-            
         try:
             schedule.run_pending()
         except Exception as e:
