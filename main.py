@@ -181,7 +181,6 @@ def place_limit_entry(symbol: str, direction: str, lot: float, entry_px: float, 
         fmt_sl = str(float(exchange.price_to_precision(symbol, sl_px)))
         fmt_tp = str(float(exchange.price_to_precision(symbol, cat_tp_px)))
         
-        # Attach SL/TP directly to Bybit V5 limit order
         order = exchange.create_order(
             symbol=symbol, type='limit', side=side, amount=fmt_lot, price=fmt_entry, 
             params={'timeInForce': 'PostOnly', 'stopLoss': fmt_sl, 'takeProfit': fmt_tp, 'tpslMode': 'Full'}
@@ -232,7 +231,6 @@ def check_pending_orders():
                 coin = sym.split('/')[0]
                 log(f"{coin} Entry Filled @ {fill_px}", "EXEC")
                 
-                # 🎯 Order Filled Alert
                 dir_icon = '🟢 LONG' if is_long else '🔴 SHORT'
                 send_telegram(f"<b>🎯 SETUP DETECTED & FILLED — {coin}</b>\nSetup: {dir_icon}\nEntry: <code>{fill_px}</code>\nSL: <code>{sl_px:.4f}</code>")
         except: pass
@@ -254,7 +252,6 @@ def sync_open_positions():
             coin = sym.split('/')[0]
             log(f"{coin} Closed | PnL: ${pnl:.2f}", "EXEC")
             
-            # ✅ Trade Closed Alert
             send_telegram(f"<b>✅ TRADE CLOSED — {coin}</b>\nSettled Net PnL: <b>${pnl:.2f}</b>")
 
 def manage_trailing_stops():
@@ -281,12 +278,10 @@ def manage_trailing_stops():
                     if fmt_sl: 
                         pos['current_sl'] = fmt_sl
                         
-                        # 🛡️ Send alert ONLY when the trail first activates to avoid API spam
                         if just_activated:
                             coin = sym.split('/')[0]
                             dir_icon = '▲ LONG' if is_long else '▼ SHORT'
                             
-                            # Calculate points locked above/below entry
                             if is_long:
                                 locked_pts = fmt_sl - pos['entry']
                                 pos_str = "above"
@@ -308,7 +303,6 @@ def check_signals():
     if is_halted() or (len(open_positions) + len(pending_orders) >= MAX_CONCURRENT): return
     
     for sym in SYMBOLS:
-        # 1. LOCK CHECK: Skip if we already have an active/pending trade for this coin
         if sym in open_positions or sym in pending_orders: 
             continue
         
@@ -328,7 +322,6 @@ def check_signals():
                 'entry_px': fmt_entry, 'lot': fmt_lot,
                 'params': {'direction': direction, 'atr': atr, 'sl_m': sl_m, 'risk_usd': risk_usd}
             }
-            # 🛑 Telegram alert removed here for silent order placement
 
 def fast_management():
     sync_open_positions()
@@ -341,6 +334,10 @@ def fast_management():
 
 if __name__ == '__main__':
     log("APEX v7.2.9 PRO Booting...", "SYS")
+    
+    # Send Startup Message to Telegram
+    send_telegram("🚀 <b>APEX SNIPER v7.2.9 PRO — ONLINE</b>\nSystem is monitoring markets and awaiting entry signals.")
+
     schedule.every(15).seconds.do(fast_management)
     for t in [":00", ":15", ":30", ":45"]:
         schedule.every().hour.at(t).do(check_signals)
