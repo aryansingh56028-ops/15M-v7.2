@@ -38,6 +38,7 @@ BYBIT_MAKER_FEE = 0.00020  # Switched to Maker fee since we use Limit Orders
 # ── Runtime State ──────────────────────────────────────────────────
 open_positions       = {}
 pending_orders       = {}  # Waiting room for 14-min limit orders
+early_warnings       = {}  # Tracks brewing setups to prevent spam
 daily_pnl_tracker    = {}
 last_trade_bar       = {}  
 active_watchlist     = []
@@ -367,6 +368,28 @@ def check_signal():
 
         long_signal  = algo_short and (smc_trend == -1)
         short_signal = algo_long and (smc_trend == 1)
+
+        # ─── EARLY WARNING RADAR (Live Unclosed Candle) ───
+        live_algo_long  = (float(df['tL'].iloc[-1]) > float(df['tL'].iloc[-2])) and (float(df['tL'].iloc[-2]) <= float(df['tL'].iloc[-3]))
+        live_algo_short = (float(df['tL'].iloc[-1]) < float(df['tL'].iloc[-2])) and (float(df['tL'].iloc[-2]) >= float(df['tL'].iloc[-3]))
+        
+        # Inverted logic matches the execution parameters
+        brewing_long  = live_algo_short and (smc_trend == -1)
+        brewing_short = live_algo_long and (smc_trend == 1)
+        
+        current_15m_bar = int(df.iloc[-1]['ts'])
+        
+        if (brewing_long or brewing_short) and early_warnings.get(symbol) != current_15m_bar:
+            early_warnings[symbol] = current_15m_bar
+            dir_str = "LONG" if brewing_long else "SHORT"
+            send_telegram(
+                f"👀 <b>A+ SETUP BREWING!</b>\n"
+                f"{'🟢 ▲' if brewing_long else '🔴 ▼'} Watch <b>{symbol.split('/')[0]}</b> for an Inverted {dir_str} Trap.\n\n"
+                f"The live 15m candle is flashing the signal. Open your TradingView chart to monitor the close!"
+            )
+            print(f"  👀 [EARLY WARNING] A+ {dir_str} setup brewing on {symbol.split('/')[0]}")
+        # ──────────────────────────────────────────────────
+
         if not long_signal and not short_signal: continue
 
         base_risk_usd = P1_RISK if CURRENT_PHASE == 1 else P2_RISK
@@ -405,13 +428,15 @@ def daily_reset():
     final_pnl = daily_pnl_tracker.get(yesterday, 0.0)
     send_telegram(f"<b>📅 Daily Reset</b>\nYesterday PnL: <code>${final_pnl:.2f}</code>\nKill-switch was {'🛑 ACTIVE' if final_pnl <= DAILY_KILL_SWITCH else '✅ NOT triggered'}")
     daily_pnl_tracker.clear()
+    early_warnings.clear() # Clear warnings memory daily
 
 if __name__ == '__main__':
     send_telegram(
         f"<b>🤑 APEX BEAST V7.3 Online</b>\nContinuous Radar & Maker Orders\n\n"
         f"Kill-Switch ${DAILY_KILL_SWITCH}/day\n"
         "🔀 DYNAMIC 5-MIN WATCHLIST\n🔥 HOUSE MONEY ACTIVE\n"
-        "⚡ STRICT 1R FREE-RIDE / 2R TRAIL"
+        "⚡ STRICT 1R FREE-RIDE / 2R TRAIL\n"
+        "👀 EARLY WARNING SYSTEM ONLINE"
     )
     
     check_signal()
