@@ -50,7 +50,7 @@ PER_SYMBOL_CONFIG = {
     'COAI/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
     'DUSK/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
     'ASTER/USDT:USDT':  (1.00, 1.00, 0.10, 30.0, 20.0),
-    'KAT/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
+    'KAT/USDT:USDT':    (0.75, 1.50, 0.10, 30.0, 20.0),
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
