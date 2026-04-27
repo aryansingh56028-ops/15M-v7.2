@@ -388,7 +388,13 @@ def check_signal():
             for e in [9, 15, 20, 21, 50, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
             
             opt_sl_m, mode, exp, wr = calculate_historical_edge(df, min_trades=100)
-            
+                   if symbol in approved_coins:
+            df = fetch_data(symbol, '15m', 500)
+            conf = approved_coins[symbol]
+            opt_sl_m, mode, exp, wr = conf['mult'], conf['mode'], conf['exp'], conf['wr']
+            # 👉 ADDED THIS LINE BELOW:
+            print(f"  🔍 Hunting for {mode} entry on {symbol.split('/')[0]}...") 
+ 
             # ── 🔥 The Burn Book & Print Monologue ──
             if not opt_sl_m: 
                 print(f"  🚫 {symbol.split('/')[0]} FAILED: Expectancy too low. Sent to Burn Book.")
