@@ -23,7 +23,7 @@ FEE_CAP_FRAC      = 0.40
 # 🔥 HOUSE MONEY & RADAR CONFIG
 HOUSE_MONEY_THRESHOLD  = 60.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
-RADAR_MIN_VOLUME       = 10000000  
+RADAR_MIN_VOLUME       = 75000000  # <--- UPGRADED: 75M Liquidity Gate
 RADAR_TOP_COINS        = 15        
 P1_RISK = 25.0                     
 P2_RISK = 25.0
@@ -70,9 +70,9 @@ def record_closed_pnl(pnl_usd: float):
     today = date.today()
     daily_pnl_tracker[today] = daily_pnl_tracker.get(today, 0.0) + pnl_usd
 
-# ── 🧠 CONTINUOUS MARKET RADAR ─────────────────────────────────────
+# ── 🧠 CONTINUOUS MARKET RADAR (Liquid Momentum Upgrade) ───────────
 def scan_market_radar():
-    print(f"📡 [RADAR] Sweeping Bybit for Top {RADAR_TOP_COINS} active targets...")
+    print(f"📡 [RADAR] Sweeping Bybit for Top {RADAR_TOP_COINS} Liquid Movers...")
     try:
         now = time.time()
         expired = [sym for sym, expiry in edge_cooldowns.items() if now > expiry]
@@ -83,16 +83,31 @@ def scan_market_radar():
         for symbol, data in tickers.items():
             if not symbol.endswith(':USDT'): continue
             if symbol in edge_cooldowns: continue 
-            qv, lp = float(data.get('quoteVolume', 0)), float(data.get('last', 0))
-            h24, l24 = float(data.get('high', 0)), float(data.get('low', 0))
-            if lp == 0 or l24 == 0 or qv < RADAR_MIN_VOLUME: continue
-            valid_coins.append({'symbol': symbol, 'volatility': (h24 - l24) / l24})
             
-        valid_coins.sort(key=lambda x: x['volatility'], reverse=True)
+            qv = float(data.get('quoteVolume', 0))
+            lp = float(data.get('last', 0))
+            h24 = float(data.get('high', 0))
+            l24 = float(data.get('low', 0))
+            
+            # Filter 1: Must pass the massive 75M liquidity gate
+            if lp == 0 or l24 == 0 or qv < RADAR_MIN_VOLUME: continue
+            
+            volatility = (h24 - l24) / l24
+            valid_coins.append({'symbol': symbol, 'volatility': volatility, 'volume': qv})
+            
+        # Filter 2: Sort by pure VOLUME first to guarantee deep order books
+        valid_coins.sort(key=lambda x: x['volume'], reverse=True)
+        top_liquid_50 = valid_coins[:50] 
+        
+        # Filter 3: Sort those top 50 safe coins by VOLATILITY
+        top_liquid_50.sort(key=lambda x: x['volatility'], reverse=True)
+        
         global active_watchlist
-        active_watchlist = [c['symbol'] for c in valid_coins[:RADAR_TOP_COINS]]
-        print(f"🎯 [RADAR LOCK] Tracking: {[s.split('/')[0] for s in active_watchlist]}")
-    except Exception: pass
+        active_watchlist = [c['symbol'] for c in top_liquid_50[:RADAR_TOP_COINS]]
+        print(f"🎯 [RADAR LOCK] Liquid Targets: {[s.split('/')[0] for s in active_watchlist]}")
+    except Exception as e: 
+        print(f"Radar Error: {e}")
+        pass
 
 # ── Indicators & Data ─────────────────────────────────────────────
 def fetch_data(symbol, timeframe='15m', limit=500):
@@ -220,10 +235,14 @@ def calculate_historical_edge(df, min_trades=100):
                             tr_r = (cat_tp - entry) / sl_dist
                             break
                         best_px = max(best_px, h)
+                        
+                        # --- UPGRADED BACKTEST TRAILING LOGIC ---
+                        # 1:1 RR -> Move to Break Even
                         if (best_px - entry) >= sl_dist and not be_triggered:
                             be_triggered = True
                             cur_sl = max(cur_sl, be_price)
-                        if (best_px - entry) >= (sl_dist * 2.0):
+                        # 1.5:1 RR -> Start Aggressive Trailing
+                        if (best_px - entry) >= (sl_dist * 1.5):
                             cur_sl = max(cur_sl, best_px - (0.10 * atr))
                     else:
                         if h >= cur_sl:
@@ -233,23 +252,30 @@ def calculate_historical_edge(df, min_trades=100):
                             tr_r = (entry - cat_tp) / sl_dist
                             break
                         best_px = min(best_px, l)
+                        
+                        # --- UPGRADED BACKTEST TRAILING LOGIC ---
+                        # 1:1 RR -> Move to Break Even
                         if (entry - best_px) >= sl_dist and not be_triggered:
                             be_triggered = True
                             cur_sl = min(cur_sl, be_price)
-                        if (entry - best_px) >= (sl_dist * 2.0):
+                        # 1.5:1 RR -> Start Aggressive Trailing
+                        if (entry - best_px) >= (sl_dist * 1.5):
                             cur_sl = min(cur_sl, best_px + (0.10 * atr))
                 if tr_r != 0.0: trades.append(tr_r)
+            
             if len(trades) >= min_trades:
                 exp = sum(trades) / len(trades)
                 wr = (sum(1 for t in trades if t > 0.05) / len(trades)) * 100
-                if exp > 0.25 and exp > best_exp:
+                # STRICT PROFITABILITY FILTER: Must be "Printing Money" (> 40% WR, > 0.35 Expectancy)
+                if exp > 0.35 and wr > 40.0 and exp > best_exp:
                     best_exp, best_mult, best_mode, best_wr = exp, sl_m, mode_name, wr
     return best_mult, best_mode, best_exp, best_wr
 
 # ── Order Monitoring & Execution ──────────────────────────────────
 def set_isolated_and_leverage(symbol, entry_price, sl_price):
     try:
-        leverage = max(1, min(math.floor(1 / (abs(entry_price - sl_price) / entry_price * 1.2)), 25))
+        # <--- UPGRADED: Capped Leverage at 10x to prevent 15m wick liquidations
+        leverage = max(1, min(math.floor(1 / (abs(entry_price - sl_price) / entry_price * 1.2)), 10))
         try: exchange.set_margin_mode('isolated', symbol)
         except Exception: pass
         try: exchange.set_leverage(leverage, symbol)
@@ -280,22 +306,35 @@ def modify_bybit_tpsl(symbol, direction, new_sl, current_tp):
 def fast_management():
     if not pending_orders and not open_positions: return
     try:
-        # Sync Orders
+        # Sync Orders & FULL TELEGRAM ALERT
         live_syms = {p['symbol'] for p in exchange.fetch_positions() if float(p.get('contracts', 0)) > 0}
         for sym in list(pending_orders.keys()):
             if sym in live_syms:
                 p = pending_orders.pop(sym)
                 open_positions[sym] = p
-                send_telegram(f"✅ <b>FILLED: {sym.split('/')[0]}</b>\n{p['mode']}\nEntry: {p['entry']:.5f}\nSL Mult: {p['opt_sl_m']}x")
+                
+                # Upgraded Telegram Entry Message
+                msg = (f"✅ <b>FILLED: {sym.split('/')[0]}</b>\n"
+                       f"Mode: {p['mode']}\n"
+                       f"Entry: {p['entry']:.5f}\n"
+                       f"SL: {p['current_sl']}\n"
+                       f"BE Target: {p['be_price']:.5f}\n"
+                       f"SL Mult: {p['opt_sl_m']}x\n"
+                       f"Backtest: WR {p['win_rate']:.1f}% | Exp +{p['expectancy']:.2f}R")
+                send_telegram(msg)
         
-        # Sync Closed
+        # Sync Closed & PNL TELEGRAM ALERT
         for sym in list(open_positions.keys()):
             if sym not in live_syms:
-                open_positions.pop(sym)
+                pos = open_positions.pop(sym)
                 recs = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': exchange.market(sym)['id'], 'limit': 1}).get('result', {}).get('list', [])
-                if recs: record_closed_pnl(float(recs[0].get('closedPnl', 0.0)))
+                if recs:
+                    pnl = float(recs[0].get('closedPnl', 0.0))
+                    record_closed_pnl(pnl)
+                    emoji = "💰" if pnl > 0 else "🩸"
+                    send_telegram(f"{emoji} <b>TRADE SETTLED: {sym.split('/')[0]}</b>\nOutcome: {pnl:+.2f} USD")
 
-        # Trailing
+        # Live Trailing Management
         for symbol, pos in list(open_positions.items()):
             df = fetch_data(symbol, '1m', 5)
             if df is None: continue
@@ -303,10 +342,15 @@ def fast_management():
             best = max(pos['best_price'], float(df.iloc[-1]['high'])) if is_l else min(pos['best_price'], float(df.iloc[-1]['low']))
             pos['best_price'] = best
             diff = abs(best - entry)
+            
+            # 1:1 RR -> Break Even & FREE RIDE ALERT
             if diff >= sl_dist and not pos.get('be_on', False):
                 pos['be_on'] = True
                 modify_bybit_tpsl(symbol, pos['direction'], pos['be_price'], pos['catastrophic_tp'])
-            if diff >= (sl_dist * 2.0):
+                send_telegram(f"🛡️ <b>FREE RIDE SECURED: {symbol.split('/')[0]}</b>\nStop Loss moved to Break Even ({pos['be_price']:.5f}).")
+            
+            # 1.5:1 RR -> Start Aggressive Trailing
+            if diff >= (sl_dist * 1.5):
                 trail = (best - (0.10 * pos['atr'])) if is_l else (best + (0.10 * pos['atr']))
                 modify_bybit_tpsl(symbol, pos['direction'], trail, pos['catastrophic_tp'])
     except Exception: pass
@@ -334,9 +378,11 @@ def check_signal():
             df = calc_smc_structure(df)
             df['rsi_14'] = calc_rsi(df['close'])
             for e in [9, 15, 20, 21, 50, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
+            
             opt_sl_m, mode, exp, wr = calculate_historical_edge(df, min_trades=100)
+            
             if not opt_sl_m: 
-                print(f"  🚫 {symbol.split('/')[0]} FAILED: Expectancy low. Burned.")
+                print(f"  🚫 {symbol.split('/')[0]} FAILED: Not printing money. Burned.")
                 edge_cooldowns[symbol] = time.time() + 3600
                 continue
             print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | SL Mult: {opt_sl_m}x | Exp: +{exp:.2f}R")
