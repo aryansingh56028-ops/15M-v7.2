@@ -23,7 +23,7 @@ FEE_CAP_FRAC      = 0.40
 # 🔥 HOUSE MONEY & RADAR CONFIG
 HOUSE_MONEY_THRESHOLD  = 60.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
-RADAR_MIN_VOLUME       = 75000000  # 75M Liquidity Gate
+RADAR_MIN_VOLUME       = 50000000  # 75M Liquidity Gate
 RADAR_TOP_COINS        = 25        
 P1_RISK = 25.0                     
 P2_RISK = 25.0
