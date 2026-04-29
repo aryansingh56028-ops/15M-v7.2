@@ -167,14 +167,14 @@ def calculate_historical_edge(df, min_trades=50):
                         if l <= cur_sl: tr_r = (cur_sl - entry) / sl_dist; break
                         if h >= cat_tp: tr_r = (cat_tp - entry) / sl_dist; break
                         best_px = max(best_px, h)
-                        # Backtest trailing logic updated to 1:1 R -> 0.10x ATR
+                        # Backtest trailing logic: 1:1 R -> 0.10x ATR
                         if (best_px - entry) >= sl_dist:
                             cur_sl = max(cur_sl, best_px - (0.10 * atr))
                     else:
                         if h >= cur_sl: tr_r = (entry - cur_sl) / sl_dist; break
                         if l <= cat_tp: tr_r = (entry - cat_tp) / sl_dist; break
                         best_px = min(best_px, l)
-                        # Backtest trailing logic updated to 1:1 R -> 0.10x ATR
+                        # Backtest trailing logic: 1:1 R -> 0.10x ATR
                         if (entry - best_px) >= sl_dist:
                             cur_sl = min(cur_sl, best_px + (0.10 * atr))
                 if tr_r != 0.0: trades.append(tr_r)
@@ -294,4 +294,108 @@ def fast_management():
             diff = abs(pos['best_price'] - entry)
             if diff >= sl_dist:
                 if is_l:
-                    trail_sl = pos['best_price'] - (0.10 * pos
+                    trail_sl = pos['best_price'] - (0.10 * pos['atr'])
+                    # Only move SL up, never down
+                    if trail_sl > float(pos['current_sl']):
+                        exchange.privatePostV5PositionTradingStop({'category': 'linear', 'symbol': exchange.market(symbol)['id'], 'side': 'Buy', 'tpslMode': 'Full', 'stopLoss': str(trail_sl)})
+                        pos['current_sl'] = trail_sl
+                        save_state()
+                        if not pos.get('trail_alerted', False):
+                            send_telegram(f"🛡️ <b>TRAILING ACTIVATED: {symbol} (1:1 R Hit)</b>\nFollowing price tight at 0.10x ATR.")
+                            pos['trail_alerted'] = True
+                else:
+                    trail_sl = pos['best_price'] + (0.10 * pos['atr'])
+                    # Only move SL down, never up
+                    if trail_sl < float(pos['current_sl']):
+                        exchange.privatePostV5PositionTradingStop({'category': 'linear', 'symbol': exchange.market(symbol)['id'], 'side': 'Sell', 'tpslMode': 'Full', 'stopLoss': str(trail_sl)})
+                        pos['current_sl'] = trail_sl
+                        save_state()
+                        if not pos.get('trail_alerted', False):
+                            send_telegram(f"🛡️ <b>TRAILING ACTIVATED: {symbol} (1:1 R Hit)</b>\nFollowing price tight at 0.10x ATR.")
+                            pos['trail_alerted'] = True
+
+    except Exception: pass
+
+# ── 📡 BACKGROUND SCANNER ──────────────────────────────────────────
+def background_scanner():
+    global is_scanning
+    if is_scanning or is_kill_switch_active(): return
+    is_scanning = True
+    today_pnl = daily_pnl_tracker.get(date.today(), 0.0)
+
+    try:
+        scan_market_radar()
+        if len(open_positions) + len(pending_orders) >= MAX_CONCURRENT: return
+
+        for symbol in active_watchlist:
+            if symbol in open_positions or symbol in pending_orders: continue
+            htf_trend = get_htf_trend(symbol)
+
+            if symbol in approved_coins:
+                conf = approved_coins[symbol]
+                opt_sl_m, mode, exp, wr, roi = conf['mult'], conf['mode'], conf['exp'], conf['wr'], conf['roi']
+                print(f"  🔍 Hunting for {mode} entry on {symbol.split('/')[0]}...")
+            else:
+                df = fetch_deep_data(symbol, '15m', 3000)
+                if df is None or len(df) < 1500: continue
+                df = add_vwap(df); df = add_fvg_obv(df); df = add_squeeze(df)
+                opt_sl_m, mode, exp, wr, roi, fail_reason = calculate_historical_edge(df, min_trades=50)
+                
+                if not opt_sl_m: 
+                    print(f"  🚫 {symbol.split('/')[0]} FAILED: {fail_reason}. Burned.")
+                    edge_cooldowns[symbol] = time.time() + 3600
+                    continue
+                print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | SL Mult: {opt_sl_m}x | Exp: +{exp:.2f}R")
+                approved_coins[symbol] = {'mult': opt_sl_m, 'mode': mode, 'exp': exp, 'wr': wr, 'roi': roi}
+
+            # Live Candle Check
+            df = fetch_deep_data(symbol, '15m', 50)
+            if df is None: continue
+            df = add_vwap(df); df = add_fvg_obv(df); df = add_squeeze(df)
+            
+            c15m = df.iloc[-2]
+            price = float(df.iloc[-1]['close'])
+            atr = float(df['high'].iloc[-14:] - df['low'].iloc[-14:]).mean() # Simplified live ATR
+            
+            l_sig, s_sig = False, False
+            if 'FVG' in mode: l_sig, s_sig = c15m['fvg_bull'] and price > c15m['daily_vwap'], c15m['fvg_bear'] and price < c15m['daily_vwap']
+            elif 'OBV' in mode: l_sig, s_sig = c15m['obv'] > c15m['obv_ema'] and price > c15m['daily_vwap'], c15m['obv'] < c15m['obv_ema'] and price < c15m['daily_vwap']
+            elif 'Squeeze' in mode: l_sig, s_sig = c15m['squeeze_on'] and price > c15m['daily_vwap'], c15m['squeeze_on'] and price < c15m['daily_vwap']
+
+            # HTF God Mode Filter
+            if htf_trend == "BEARISH": l_sig = False
+            if htf_trend == "BULLISH": s_sig = False
+
+            if not l_sig and not s_sig: continue
+            
+            risk = (P1_RISK if CURRENT_PHASE == 1 else P2_RISK) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
+            direction = 'LONG' if l_sig else 'SHORT'
+            sl_p = price - (opt_sl_m * atr) if l_sig else price + (opt_sl_m * atr)
+            tp_p = price + (10.0 * atr) if l_sig else price - (10.0 * atr)
+            sl_d = abs(price - sl_p)
+            
+            order, f_size, f_sl, f_tp = execute_trade(symbol, direction, risk / sl_d, price, sl_p, tp_p)
+            if order:
+                pending_orders[symbol] = {'direction': direction, 'entry': price, 'size': f_size, 'atr': atr, 'opt_sl_m': opt_sl_m,
+                                          'current_sl': f_sl, 'sl_distance': sl_d, 'be_price': price * 1.002 if l_sig else price * 0.998, 
+                                          'mode': mode, 'win_rate': wr, 'expectancy': exp, 'roi': roi, 'entry_time': time.time()}
+                save_state()
+    except Exception: pass
+    finally: is_scanning = False
+
+def trigger_scanner():
+    threading.Thread(target=background_scanner).start()
+
+# ── Main Loop ──────────────────────────────────────────────────────
+if __name__ == '__main__':
+    load_state()
+    send_telegram("🤖 <b>Apex Beast V9.0 is ONLINE</b>\n📡 Scanning Top 15 Coins...\n📊 Volume Surge & Hunter Logs: Active")
+    
+    trigger_scanner() 
+    schedule.every(1).minutes.do(fast_management)            
+    schedule.every(15).minutes.at(":00").do(trigger_scanner) 
+    schedule.every().day.at("00:05").do(lambda: (daily_pnl_tracker.clear(), approved_coins.clear(), edge_cooldowns.clear()))
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
