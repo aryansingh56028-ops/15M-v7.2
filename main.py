@@ -9,10 +9,10 @@ import threading
 from datetime import datetime, timezone, date
 
 # ── Credentials & Config ───────────────────────────────────────────
-BYBIT_API_KEY    = "jImaJiIeKBjAQW9z3W"      
-BYBIT_API_SECRET = "YBinRS6gX355mnRmiRCCwo2rRVQUGMo3pgSu"   
+BYBIT_API_KEY    = "FOqGNCN6gRxu4bqMqF"      
+BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"   
 
-TELEGRAM_BOT_TOKEN = "8586984642:AAEMFum2ICKmwS1NF8XYmUNDxRdYN7aRJmY"  
+TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"  
 TELEGRAM_CHAT_ID   = "1932328527"               
 
 CURRENT_PHASE     = 1        
@@ -29,13 +29,8 @@ RADAR_TOP_COINS        = 50
 P1_RISK = 25.0                     
 P2_RISK = 25.0
 
-# 🛑 CRYPTO-ONLY BLOCKLIST
-# Prevents the bot from trading Metals, Energy, Forex, and Global Indices on Bybit
-NON_CRYPTO_BLOCKLIST = {
-    'XAU', 'XAG', 'WTI', 'BRENT', 'COPPER', 'PLAT', 'PALLADIUM', 
-    'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'SGD',
-    'US30', 'US100', 'US500', 'UK100', 'DE40', 'NI225', 'HK50', 'EU50'
-}
+# 🚫 BLOCKLIST (Crypto Only - No Metals/Commodities)
+BLOCKLIST = ['XAUT', 'PAXG', 'XAU', 'XAG', 'GOLD', 'SILVER']
 
 # ── AlgoAlpha Indicator Constants ─────────────────────────────────
 ST_FACTOR  = 2.0    
@@ -127,12 +122,10 @@ def scan_market_radar():
         valid_coins = []
         for symbol, data in tickers.items():
             if not symbol.endswith(':USDT'): continue
-            
-            # 👉 NEW: Apply Blocklist
-            base_coin = symbol.split('/')[0]
-            if base_coin in NON_CRYPTO_BLOCKLIST: continue
-            
             if symbol in edge_cooldowns: continue 
+            
+            # Blocklist check for Metals/Commodities
+            if any(blocked in symbol for blocked in BLOCKLIST): continue
             
             qv = float(data.get('quoteVolume', 0))
             lp = float(data.get('last', 0))
@@ -150,7 +143,7 @@ def scan_market_radar():
         
         global active_watchlist
         active_watchlist = [c['symbol'] for c in top_liquid_50[:RADAR_TOP_COINS]]
-        print(f"🎯 [RADAR LOCK] Crypto Targets: {[s.split('/')[0] for s in active_watchlist]}")
+        print(f"🎯 [RADAR LOCK] Liquid Targets: {[s.split('/')[0] for s in active_watchlist]}")
     except Exception as e: 
         print(f"Radar Error: {e}")
 
@@ -242,6 +235,28 @@ def calc_sweeps(df, lookback=96, holding_period=12):
     df['recent_sweep_lod'] = df['sweep_lod'].rolling(holding_period).max().fillna(0)
     return df
 
+def calc_orb_fvg(df):
+    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+    df['hour'] = df['datetime'].dt.hour
+    df['minute'] = df['datetime'].dt.minute
+    
+    # 07:00 UTC (London) and 13:00 UTC (NY) Sessions
+    is_london_open = (df['hour'] == 7) & (df['minute'] == 0)
+    is_ny_open = (df['hour'] == 13) & (df['minute'] == 0)
+    
+    orb_h = np.where(is_london_open | is_ny_open, df['high'], np.nan)
+    orb_l = np.where(is_london_open | is_ny_open, df['low'], np.nan)
+    
+    df['orb_high'] = pd.Series(orb_h).ffill()
+    df['orb_low'] = pd.Series(orb_l).ffill()
+    
+    df['sweep_orb_high'] = ((df['high'] > df['orb_high']) & (df['close'] < df['orb_high'])).astype(int)
+    df['sweep_orb_low'] = ((df['low'] < df['orb_low']) & (df['close'] > df['orb_low'])).astype(int)
+    
+    df['recent_sweep_orb_high'] = df['sweep_orb_high'].rolling(12).max().fillna(0)
+    df['recent_sweep_orb_low'] = df['sweep_orb_low'].rolling(12).max().fillna(0)
+    return df
+
 def calc_fvg(df):
     df['fvg_bull'] = df['low'] > df['high'].shift(2)
     df['fvg_bear'] = df['high'] < df['low'].shift(2)
@@ -256,32 +271,8 @@ def calc_ict(df, holding=12):
     df['recent_fvg_bear'] = df['fvg_bear'].astype(int).rolling(holding).max().fillna(0)
     return df
 
-def calc_sessions(df):
-    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
-    df['hour'] = df['datetime'].dt.hour
-    df['minute'] = df['datetime'].dt.minute
-    
-    is_london_open = (df['hour'] == 7) & (df['minute'] == 0)
-    is_ny_open = (df['hour'] == 13) & (df['minute'] == 0)
-    
-    df['or_high'] = np.where(is_london_open | is_ny_open, df['high'], np.nan)
-    df['or_low'] = np.where(is_london_open | is_ny_open, df['low'], np.nan)
-    
-    df['or_high'] = pd.Series(df['or_high']).ffill()
-    df['or_low'] = pd.Series(df['or_low']).ffill()
-    
-    df['is_active_session'] = df['hour'].isin([7, 8, 9, 10, 13, 14, 15, 16])
-    
-    df['sweep_or_low'] = (df['low'] < df['or_low']) & (df['close'] > df['or_low']) & df['is_active_session']
-    df['sweep_or_high'] = (df['high'] > df['or_high']) & (df['close'] < df['or_high']) & df['is_active_session']
-    
-    df['recent_or_sweep_low'] = df['sweep_or_low'].rolling(12).max().fillna(0)
-    df['recent_or_sweep_high'] = df['sweep_or_high'].rolling(12).max().fillna(0)
-    
-    return df
-
 # ── 🧠 PHASE 2: MATCHED EXECUTION BRUTE FORCE OPTIMIZER ────────────
-def calculate_historical_edge(df, min_trades=75):
+def calculate_historical_edge(df, min_trades=75): 
     algo_l = (df['tL'].shift(1) > df['tL'].shift(2)) & (df['tL'].shift(2) <= df['tL'].shift(3))
     algo_s = (df['tL'].shift(1) < df['tL'].shift(2)) & (df['tL'].shift(2) >= df['tL'].shift(3))
     smc_t = df['smc_trend'].shift(1)
@@ -293,6 +284,7 @@ def calculate_historical_edge(df, min_trades=75):
         'Regime 2 (Pure Inverted)': (algo_s & (smc_t == -1), algo_l & (smc_t == 1))
     }
     
+    # Expanded EMAs to include 100 for the ORB Regime filter
     emas = [9, 15, 20, 21, 50, 100, 200]
     for e in emas:
         ema_col = df[f'ema_{e}'].shift(1)
@@ -307,9 +299,10 @@ def calculate_historical_edge(df, min_trades=75):
     regimes['Regime 5 (Beast: SMC + MACD 24/7)'] = (b_long, b_short)
     regimes['Regime 6 (Beast: SMC + MACD Time Window)'] = (b_long & df['in_window'].shift(1), b_short & df['in_window'].shift(1))
 
-    orb_l = (df['recent_or_sweep_low'].shift(1) > 0) & (df['recent_mss_bull'].shift(1) > 0) & (df['recent_fvg_bull'].shift(1) > 0) & (close > df['ema_100'].shift(1)) & df['is_active_session'].shift(1)
-    orb_s = (df['recent_or_sweep_high'].shift(1) > 0) & (df['recent_mss_bear'].shift(1) > 0) & (df['recent_fvg_bear'].shift(1) > 0) & (close < df['ema_100'].shift(1)) & df['is_active_session'].shift(1)
-    regimes['Regime 7 (ICT: ORB + FVG Retest)'] = (orb_l, orb_s)
+    # 🔥 NEW REGIME 7: ORB Manipulation & FVG Retest
+    orb_l = (df['recent_sweep_orb_low'].shift(1) > 0) & (df['recent_mss_bull'].shift(1) > 0) & (df['recent_fvg_bull'].shift(1) > 0) & (close > df['ema_100'].shift(1))
+    orb_s = (df['recent_sweep_orb_high'].shift(1) > 0) & (df['recent_mss_bear'].shift(1) > 0) & (df['recent_fvg_bear'].shift(1) > 0) & (close < df['ema_100'].shift(1))
+    regimes['Regime 7 (ORB Manipulation + FVG Retest)'] = (orb_l, orb_s)
 
     test_multipliers = [1.50, 2.00, 2.50, 3.00]
     best_mult, best_mode, best_exp, best_wr = None, None, 0.0, 0.0
@@ -426,6 +419,8 @@ def fast_management():
     if not pending_orders and not open_positions: return
     try:
         live_syms = {p['symbol'] for p in exchange.fetch_positions() if float(p.get('contracts', 0)) > 0}
+        
+        # Monitor pending limits becoming open positions
         for sym in list(pending_orders.keys()):
             if sym in live_syms:
                 p = pending_orders.pop(sym)
@@ -435,10 +430,37 @@ def fast_management():
                        f"Entry: {p['entry']:.5f}\nSL: {p['current_sl']}\nTP (2R): {p['take_profit']:.5f}\n"
                        f"Regime: {p['mode']}\nWR: {p['win_rate']:.1f}%")
                 send_telegram(msg)
-        for sym in list(open_positions.keys()):
-            if sym not in live_syms:
-                pos = open_positions.pop(sym)
-                handle_closed_trade(sym, pos)
+                
+        # Handle trades closing or Breakeven adjustments
+        if open_positions:
+            tickers = exchange.fetch_tickers(list(open_positions.keys()))
+            for sym in list(open_positions.keys()):
+                if sym not in live_syms:
+                    pos = open_positions.pop(sym)
+                    handle_closed_trade(sym, pos)
+                elif sym in tickers: # 1:1 Breakeven Logic
+                    last_price = tickers[sym]['last']
+                    pos = open_positions[sym]
+                    if pos['direction'] == 'LONG':
+                        if last_price >= pos['entry'] + pos['sl_distance'] and pos['current_sl'] < pos['entry']:
+                            try:
+                                exchange.private_post_v5_position_trading_stop({
+                                    'category': 'linear', 'symbol': exchange.market(sym)['id'], 
+                                    'stopLoss': str(pos['entry']), 'positionIdx': 0
+                                })
+                                pos['current_sl'] = pos['entry']
+                                send_telegram(f"🛡️ <b>BREAK EVEN ACTIVATED: {sym.split('/')[0]}</b>\n1:1 RR Reached. SL moved to Entry.")
+                            except Exception: pass
+                    else:
+                        if last_price <= pos['entry'] - pos['sl_distance'] and pos['current_sl'] > pos['entry']:
+                            try:
+                                exchange.private_post_v5_position_trading_stop({
+                                    'category': 'linear', 'symbol': exchange.market(sym)['id'], 
+                                    'stopLoss': str(pos['entry']), 'positionIdx': 0
+                                })
+                                pos['current_sl'] = pos['entry']
+                                send_telegram(f"🛡️ <b>BREAK EVEN ACTIVATED: {sym.split('/')[0]}</b>\n1:1 RR Reached. SL moved to Entry.")
+                            except Exception: pass
     except Exception: pass
 
 def check_signal():
@@ -456,9 +478,10 @@ def check_signal():
         df = calc_smc_structure(df)
         df['rsi_14'] = calc_rsi(df['close'])
         
+        # Include EMA 100 for ORB trend filtering
         for e in [9, 15, 20, 21, 50, 100, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
         
-        df = calc_sweeps(df); df = calc_fvg(df); df = calc_ict(df); df = calc_macd(df); df = calc_sessions(df)
+        df = calc_sweeps(df); df = calc_orb_fvg(df); df = calc_fvg(df); df = calc_ict(df); df = calc_macd(df)
         
         opt_sl_m, mode, exp, wr, roi, pf, reason = calculate_historical_edge(df, min_trades=75)
         if not opt_sl_m: 
@@ -474,16 +497,7 @@ def check_signal():
         volume_surge = float(c15m['volume']) > (float(c15m['vol_ma']) * 1.1)
         if not volume_surge: continue
 
-        algo_l = (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3]))
-        direction = 'LONG' if algo_l else 'SHORT' 
-        
-        if 'Regime 5' in mode or 'Regime 6' in mode:
-            b_l = (float(df['recent_sweep_lod'].iloc[-2]) > 0) and (float(df['recent_mss_bull'].iloc[-2]) > 0) and (float(df['recent_fvg_bull'].iloc[-2]) > 0) and (float(df['close'].iloc[-2]) > float(df['ema_20'].iloc[-2])) and (float(df['macd_flip_bull'].iloc[-2]))
-            direction = 'LONG' if b_l else 'SHORT'
-        elif 'Regime 7' in mode:
-            orb_l = (float(df['recent_or_sweep_low'].iloc[-2]) > 0) and (float(df['recent_mss_bull'].iloc[-2]) > 0) and (float(df['recent_fvg_bull'].iloc[-2]) > 0) and (float(df['close'].iloc[-2]) > float(df['ema_100'].iloc[-2]))
-            direction = 'LONG' if orb_l else 'SHORT'
-
+        direction = 'LONG' if (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3])) else 'SHORT'
         sl_p = price - (opt_sl_m * atr) if direction == 'LONG' else price + (opt_sl_m * atr)
         tp_p = price + (opt_sl_m * atr * 2.0) if direction == 'LONG' else price - (opt_sl_m * atr * 2.0)
         sl_d = abs(price - sl_p)
@@ -499,7 +513,7 @@ def check_signal():
 def run_threaded(job_func): threading.Thread(target=job_func).start()
 
 if __name__ == '__main__':
-    send_telegram("🤖 <b>Apex Beast V8.4 (Crypto Only) ONLINE</b>\n📡 Target: Top 50 Cryptos\n🛑 Blocklist: Metals, Indices & Forex Disabled")
+    send_telegram("🤖 <b>Apex Beast V8.3 ONLINE</b>\n📡 Net Widened: 50 Coins | ORB FVG & BE Live")
     threading.Thread(target=check_signal).start()
     schedule.every(30).seconds.do(fast_management)
     schedule.every(15).minutes.at(":00").do(run_threaded, check_signal) 
