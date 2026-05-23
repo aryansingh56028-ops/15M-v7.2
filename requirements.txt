@@ -1,5 +1,5 @@
 ccxt
+aiohttp
 pandas
 numpy
-requests
-schedule
+python-dotenv
