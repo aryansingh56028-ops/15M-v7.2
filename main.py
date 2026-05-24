@@ -36,7 +36,9 @@ DAILY_KILL_SWITCH  = -125.0   # 5R Prop-Firm Hard Stop (Realized)
 EQUITY_HARD_STOP   = -100.0   # 4R Prop-Firm Equity Circuit Breaker (Realized + Unrealized)
 DEFENSIVE_DD_LIMIT = -75.0    # 3R Defensive Mode Trigger
 DEFENSIVE_RISK     = 25.0     
-BASE_RISK_PER_TRADE = 30.0    
+
+# 📈 UPDATED RISK & MULTIPLIERS (As requested) ──────────────────────
+BASE_RISK_PER_TRADE = 50.0    # Changed from 30.0 to 50.0
 MAX_CONCURRENT     = 3        
 NEWS_BLACKOUT_MINUTES = 45    
 
@@ -189,6 +191,7 @@ def algoalpha_baseline(df, period, factor, wma_len, ema_len, atr_col):
     return calc_wma(pd.Series((lower + upper) / 2.0, index=df.index), wma_len).ewm(span=ema_len, adjust=False).mean()
 
 def get_vip_settings(symbol):
+    # 📈 SL & TP ATR MULTIPLIERS (Updated from 1.5 to 1.5 exactly)
     return (2.0, 14, 30, 8, 1.5)
 
 def calc_propedge_pro(df, symbol):
@@ -266,10 +269,9 @@ async def handle_closed_trade(sym, pos):
         peak = pos.get('peak_px', pos['entry'])
         max_r = (peak - pos['entry']) / pos['sl_distance'] if is_l else (pos['entry'] - peak) / pos['sl_distance']
         
-        if max_r >= 1.95: 
-            pnl = BASE_RISK_PER_TRADE * 2.0
-        elif pos.get('be_activated'):
-            pnl = BASE_RISK_PER_TRADE * 0.1
+        # 📈 Adjusted fallback scaling for 1:1 structure
+        if max_r >= 0.95: 
+            pnl = BASE_RISK_PER_TRADE * 1.0
         else:
             pnl = -BASE_RISK_PER_TRADE
     
@@ -341,7 +343,6 @@ async def dynamic_radar_loop():
                 else: coin_tiers[symbol] = {'tier': 3, 'max_spread': 0.35}
 
                 try:
-                    # 288 bars * 5m = 1440 minutes = 24h lookback window
                     bars = await asyncio.to_thread(rest_exchange.fetch_ohlcv, symbol, '5m', limit=288)
                     if not bars or len(bars) < 288: continue
                     
@@ -491,8 +492,8 @@ async def execute_trade_market(symbol, direction, risk_usd, trigger_px, sl_px, r
                     f"Quantity: {f_sz}\n"
                     f"Trigger: {trigger_px:.5f}\n"
                     f"SL: {f_sl}\n"
-                    f"TP (2R): {f_tp}\n"
-                    f"Management: Strict 1:2 RR (1R BE + Fees)")
+                    f"TP (1R): {f_tp}\n"
+                    f"Management: Fixed 1:1 RR")
         await send_telegram(main_msg)
 
     except Exception as e: log_terminal("❌ ERROR", symbol, f"Market Execution failed: {e}")
@@ -537,8 +538,6 @@ async def analyze_structure(symbol):
         df_5m = calc_propedge_pro(df_5m, symbol)
         c_vip = df_5m.iloc[-2]
 
-        # ── Rejection Signal (STRONG - ▲▼ arrows) ──
-        # Price retested trend line and failed to break = continuation
         rej_bull = False
         rej_bear = False
 
@@ -547,9 +546,8 @@ async def analyze_structure(symbol):
         high_vals = df_5m['high'].values
         low_vals = df_5m['low'].values
 
-        # Count consecutive bars touching trend line (confirmation count = 2)
         rejcount = 0
-        for i in range(-6, -1):  # last 5 closed bars on 5M structure
+        for i in range(-6, -1):  
             bar_touches = (
                 high_vals[i] > tL_vals[i] and 
                 low_vals[i] < tL_vals[i]
@@ -557,36 +555,33 @@ async def analyze_structure(symbol):
             if bar_touches:
                 rejcount += 1
             else:
-                rejcount = 0  # must be consecutive
+                rejcount = 0  
 
         rej_bull = rejcount >= 2 and trend_vals[-2] == 1
         rej_bear = rejcount >= 2 and trend_vals[-2] == -1
 
-        # ── Trend Flip Signal (WEAK - label only) ──
         flip_bull = bool(c_vip['pe_bull_entry']) or bool(c_vip['pe_trend_bull'])
         flip_bear = bool(c_vip['pe_bear_entry']) or bool(c_vip['pe_trend_bear'])
 
-        # ── Signal Routing with Priority ──
         if rej_bull:
             direction = "LONG"
-            signal_type = "REJECTION"      # Strong - always take
-            allocated_risk = allocated_risk  # Full risk
+            signal_type = "REJECTION"      
+            allocated_risk = allocated_risk  
         elif rej_bear:
             direction = "SHORT"
             signal_type = "REJECTION"
             allocated_risk = allocated_risk
         elif flip_bull:
             direction = "LONG"
-            signal_type = "TREND_FLIP"     # Weak - reduced risk
-            allocated_risk = allocated_risk * 0.75  # Only 75% risk on flips
+            signal_type = "TREND_FLIP"     
+            allocated_risk = allocated_risk * 0.75  
         elif flip_bear:
             direction = "SHORT"
             signal_type = "TREND_FLIP"
             allocated_risk = allocated_risk * 0.75
         else:
-            return  # No signal
+            return  
 
-        # ── Extra filter: skip weak flips if recent loss ──
         if signal_type == "TREND_FLIP":
             consecutive = daily_pnl_tracker.get('consecutive_losses', 0)
             if consecutive >= 1:
@@ -609,7 +604,8 @@ async def analyze_structure(symbol):
         if direction == "LONG": sl = entry - (sl_m * atr)
         else: sl = entry + (sl_m * atr)
 
-        target_rr = 2.0 
+        # 📈 RR TARGET CHANGED TO 1:1 FIXED (As requested)
+        target_rr = 1.0 
 
         await execute_trade_market(
             symbol, direction, allocated_risk, entry, sl, target_rr, 
@@ -693,19 +689,9 @@ async def fast_management_loop():
                     cur_px = float(tickers[sym]['last'])
                     is_l = pos['direction'] == 'LONG'
                     pos['peak_px'] = max(pos['peak_px'], cur_px) if is_l else min(pos['peak_px'], cur_px)
-                    current_r = ((cur_px - pos['entry']) if is_l else (pos['entry'] - cur_px)) / pos['sl_distance']
-
-                    if 'Regime 15' in pos['regime_id']:
-                        if current_r >= 1.0 and not pos.get('be_activated', False):
-                            fee_buffer = pos['entry'] * 0.0011 
-                            be_px = pos['entry'] + fee_buffer if is_l else pos['entry'] - fee_buffer
-                            
-                            try:
-                                await modify_bybit_tpsl(sym, pos['direction'], be_px, pos['catastrophic_tp'])
-                                pos['current_trail_sl'] = be_px
-                                pos['be_activated'] = True
-                                await send_telegram(f"🛡️ BE LOCKED: {sym.split('/')[0]}\nPrice reached TP1 (1R). Stop moved to Entry + Fees.")
-                            except Exception: pass
+                    
+                    # 📈 BREAKeven (BE) CONFIGURATION ENTIRELY REMOVED FROM THIS LOOP
+                    # The bot now relies exclusively on Bybit's native exchange-side SL and TP execution.
 
         except Exception as e: 
             log_terminal("❌ ERROR", None, f"Mgmt Loop Crash: {e}")
@@ -748,11 +734,11 @@ async def sync_open_positions_on_startup():
 async def main():
     os.system('cls' if os.name == 'nt' else 'clear') 
     print("======================================================")
-    print("  🤖 APEX V1.0 : REGIME 15 VIP (5M MODE)              ")
+    print("  🤖 APEX V1.0 : REGIME 15 VIP (5M MODE) - 1:1 FIXED  ")
     print("======================================================\n")
     load_daily_pnl()
     await sync_open_positions_on_startup()
-    await send_telegram(f"🤖 <b>Apex V1.0 ONLINE</b>\nPropEdge VIP (Regime 15 - 5M) Active.")
+    await send_telegram(f"🤖 <b>Apex V1.0 ONLINE</b>\nPropEdge VIP 1:1 FIXED (Risk: $50) Active.")
     await asyncio.gather(dynamic_radar_loop(), fast_management_loop())
 
 if __name__ == '__main__':
