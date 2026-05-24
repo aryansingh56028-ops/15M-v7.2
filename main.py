@@ -37,8 +37,8 @@ EQUITY_HARD_STOP   = -100.0   # 4R Prop-Firm Equity Circuit Breaker (Realized + 
 DEFENSIVE_DD_LIMIT = -75.0    # 3R Defensive Mode Trigger
 DEFENSIVE_RISK     = 25.0     
 
-# 📈 UPDATED RISK & MULTIPLIERS (As requested) ──────────────────────
-BASE_RISK_PER_TRADE = 50.0    # Changed from 30.0 to 50.0
+# 📈 UPDATED RISK
+BASE_RISK_PER_TRADE = 50.0    
 MAX_CONCURRENT     = 3        
 NEWS_BLACKOUT_MINUTES = 45    
 
@@ -191,12 +191,17 @@ def algoalpha_baseline(df, period, factor, wma_len, ema_len, atr_col):
     return calc_wma(pd.Series((lower + upper) / 2.0, index=df.index), wma_len).ewm(span=ema_len, adjust=False).mean()
 
 def get_vip_settings(symbol):
-    # 📈 SL & TP ATR MULTIPLIERS (Updated from 1.5 to 1.5 exactly)
-    return (2.0, 14, 30, 8, 1.5)
+    # 📈 INDICATOR PARAMS UPDATED TO MATCH SCREENSHOT EXACTLY
+    # Returns: (Supertrend_Factor, Supertrend_ATR_Period, WMA_Length, EMA_Length, SL_Multiplier, Target_ATR_Period)
+    return (3.0, 10, 10, 3, 0.5, 14)
 
 def calc_propedge_pro(df, symbol):
-    st_f, st_p, wma_len, ema_len, _ = get_vip_settings(symbol)
-    df['pe_atr'] = calc_atr(df, st_p)
+    st_f, st_p, wma_len, ema_len, _, target_atr_p = get_vip_settings(symbol)
+    
+    # 📈 SEPARATED BASELINE ATR AND TARGET ATR
+    df['pe_atr'] = calc_atr(df, st_p)             # For the trend baseline (10)
+    df['target_atr'] = calc_atr(df, target_atr_p) # For SL and TP calculations (14)
+    
     df['pe_tL'] = algoalpha_baseline(df, period=st_p, factor=st_f, wma_len=wma_len, ema_len=ema_len, atr_col='pe_atr')
     
     st_trend = np.zeros(len(df))
@@ -255,7 +260,6 @@ async def handle_closed_trade(sym, pos):
     pnl = None
     start_t = pos['timestamp']  
     
-    # Wait up to 3 minutes for the API
     for i in range(12):
         await asyncio.sleep(15) 
         pnl = await asyncio.to_thread(fetch_matched_pnl, sym, start_t)
@@ -263,15 +267,14 @@ async def handle_closed_trade(sym, pos):
             
     base_sym = sym.split('/')[0]
     
-    # GUARANTEED PNL RESOLUTION (No fallback messages)
     if pnl is None:
         is_l = pos['direction'] == 'LONG'
         peak = pos.get('peak_px', pos['entry'])
         max_r = (peak - pos['entry']) / pos['sl_distance'] if is_l else (pos['entry'] - peak) / pos['sl_distance']
         
-        # 📈 Adjusted fallback scaling for 1:1 structure
-        if max_r >= 0.95: 
-            pnl = BASE_RISK_PER_TRADE * 1.0
+        # 📈 Adjusted fallback scaling for 1:2 structure
+        if max_r >= 1.95: 
+            pnl = BASE_RISK_PER_TRADE * 2.0
         else:
             pnl = -BASE_RISK_PER_TRADE
     
@@ -492,8 +495,8 @@ async def execute_trade_market(symbol, direction, risk_usd, trigger_px, sl_px, r
                     f"Quantity: {f_sz}\n"
                     f"Trigger: {trigger_px:.5f}\n"
                     f"SL: {f_sl}\n"
-                    f"TP (1R): {f_tp}\n"
-                    f"Management: Fixed 1:1 RR")
+                    f"TP (2R): {f_tp}\n"
+                    f"Management: Fixed 1:2 RR")
         await send_telegram(main_msg)
 
     except Exception as e: log_terminal("❌ ERROR", symbol, f"Market Execution failed: {e}")
@@ -546,6 +549,7 @@ async def analyze_structure(symbol):
         high_vals = df_5m['high'].values
         low_vals = df_5m['low'].values
 
+        # 📈 REJECTION CONFIRMATION COUNT REMAINS 2 (As per screenshot)
         rejcount = 0
         for i in range(-6, -1):  
             bar_touches = (
@@ -596,16 +600,18 @@ async def analyze_structure(symbol):
         tier_val = coin_tiers.get(symbol, {}).get('tier', 3)
         tier_grade = "A+" if tier_val == 1 else ("B" if tier_val == 2 else "C")
         regime = "Regime 15 (PropEdge VIP 5M)"
-        _, _, _, _, sl_m = get_vip_settings(symbol)
-        atr = float(c_vip['pe_atr'])
+        
+        # 📈 FETCH SL MULTIPLIER AND TARGET ATR FOR ENTRY CALCULATION
+        _, _, _, _, sl_m, _ = get_vip_settings(symbol)
+        atr = float(c_vip['target_atr'])
         curr_px = float(df_5m['close'].iloc[-1])
         
         entry = curr_px
         if direction == "LONG": sl = entry - (sl_m * atr)
         else: sl = entry + (sl_m * atr)
 
-        # 📈 RR TARGET CHANGED TO 1:1 FIXED (As requested)
-        target_rr = 1.0 
+        # 📈 RR TARGET CHANGED TO 2.0 (1:2 Ratio matching the screenshot TP multipliers)
+        target_rr = 2.0 
 
         await execute_trade_market(
             symbol, direction, allocated_risk, entry, sl, target_rr, 
@@ -689,9 +695,6 @@ async def fast_management_loop():
                     cur_px = float(tickers[sym]['last'])
                     is_l = pos['direction'] == 'LONG'
                     pos['peak_px'] = max(pos['peak_px'], cur_px) if is_l else min(pos['peak_px'], cur_px)
-                    
-                    # 📈 BREAKeven (BE) CONFIGURATION ENTIRELY REMOVED FROM THIS LOOP
-                    # The bot now relies exclusively on Bybit's native exchange-side SL and TP execution.
 
         except Exception as e: 
             log_terminal("❌ ERROR", None, f"Mgmt Loop Crash: {e}")
@@ -734,11 +737,11 @@ async def sync_open_positions_on_startup():
 async def main():
     os.system('cls' if os.name == 'nt' else 'clear') 
     print("======================================================")
-    print("  🤖 APEX V1.0 : REGIME 15 VIP (5M MODE) - 1:1 FIXED  ")
+    print("  🤖 APEX V1.0 : REGIME 15 VIP (5M MODE) - 1:2 FIXED  ")
     print("======================================================\n")
     load_daily_pnl()
     await sync_open_positions_on_startup()
-    await send_telegram(f"🤖 <b>Apex V1.0 ONLINE</b>\nPropEdge VIP 1:1 FIXED (Risk: $50) Active.")
+    await send_telegram(f"🤖 <b>Apex V1.0 ONLINE</b>\nPropEdge VIP 1:2 FIXED (Risk: $50) Active.")
     await asyncio.gather(dynamic_radar_loop(), fast_management_loop())
 
 if __name__ == '__main__':
