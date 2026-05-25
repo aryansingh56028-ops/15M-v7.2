@@ -44,6 +44,7 @@ SMC_MIN_VOLUME         = 250000000
 SMC_RADAR_TOP_COINS    = 5        
 TREND_MIN_VOLUME       = 50000000   
 TREND_RADAR_TOP_COINS  = 150        
+STP_SCORE_THRESHOLD    = 55           # Only watch coins with trending conditions
 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT', 'XRP/USDT:USDT'] 
 CORR_GROUPS = [
@@ -393,6 +394,8 @@ async def handle_closed_trade(sym, pos):
         
         if max_r >= 1.95: 
             pnl = BASE_RISK_PER_TRADE * 2.0
+        elif max_r >= 1.45 and pos.get('be_activated'):
+            pnl = BASE_RISK_PER_TRADE * 0.05  # Near breakeven
         elif pos.get('be_activated'):
             pnl = BASE_RISK_PER_TRADE * 0.1
         else:
@@ -441,6 +444,48 @@ async def handle_closed_trade(sym, pos):
         edge_cooldowns[sym] = time.time() + 3600   
 
 # ── 🔥 DYNAMIC RADAR 🔥 ──
+async def score_coin_for_stp(symbol, bars):
+    if len(bars) < 100: return 0.0
+    
+    closes = [float(b[4]) for b in bars]
+    highs  = [float(b[2]) for b in bars]
+    lows   = [float(b[3]) for b in bars]
+    vols   = [float(b[5]) for b in bars]
+    
+    # 1. ADX proxy — directional strength
+    # Simple: (highest high - lowest low) / avg_true_range over 14 bars
+    last14_range = max(highs[-14:]) - min(lows[-14:])
+    tr_list = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), 
+                abs(lows[i]-closes[i-1])) for i in range(-14,0)]
+    atr14 = sum(tr_list) / 14
+    adx_proxy = min((last14_range / atr14) / 5.0 * 100, 100) if atr14 > 0 else 0
+
+    # 2. Choppiness proxy — lower = more trending
+    atr_sum = sum(tr_list)
+    full_range = max(highs[-14:]) - min(lows[-14:])
+    chop = 100 * (atr_sum / full_range) / 1.146 if full_range > 0 else 100
+    trend_score = max(0, 100 - chop)  # invert: high = trending
+
+    # 3. EMA slope — price above rising EMA = bullish trend
+    ema21 = closes[-1]
+    for c in reversed(closes[-22:-1]):
+        ema21 = c * (2/22) + ema21 * (1 - 2/22)
+    ema_slope = (closes[-1] - closes[-6]) / closes[-6] * 100  # 5-bar momentum %
+
+    # 4. Volume expansion — volume growing = participation
+    avg_vol = sum(vols[-20:]) / 20
+    vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 1.0
+    vol_score = min(vol_ratio * 50, 100)
+
+    # Composite (matches STP regime weights roughly)
+    composite = (adx_proxy * 0.40) + (trend_score * 0.35) + (vol_score * 0.25)
+    
+    # Bonus: EMA slope alignment (momentum confirmation)
+    if abs(ema_slope) > 0.3:
+        composite = min(composite * 1.15, 100)
+    
+    return composite
+
 async def dynamic_radar_loop():
     for sym in VIP_SYMBOLS:
         coin_tiers[sym] = {'tier': 1, 'max_spread': 0.05}
@@ -473,14 +518,19 @@ async def dynamic_radar_loop():
                     avg_24h_vol = sum(float(b[5]) for b in bars) / 288
                     vol_accel = current_5m_vol / max(avg_24h_vol, 1e-8)
                     
-                    coin_data = {'symbol': symbol, 'vol_accel': vol_accel}
+                    stp_score = await score_coin_for_stp(symbol, bars)
+                    
+                    if stp_score < STP_SCORE_THRESHOLD and symbol not in VIP_SYMBOLS:
+                        continue
+                        
+                    coin_data = {'symbol': symbol, 'vol_accel': vol_accel, 'stp_score': stp_score}
                     if qv >= SMC_MIN_VOLUME: bucket_a_choppy.append(coin_data)
                     if qv >= TREND_MIN_VOLUME: bucket_b_trending.append(coin_data)
                 except Exception: pass
                 await asyncio.sleep(0.01) 
 
-            bucket_a_choppy.sort(key=lambda x: x['vol_accel'], reverse=True)
-            bucket_b_trending.sort(key=lambda x: x['vol_accel'], reverse=True)
+            bucket_a_choppy.sort(key=lambda x: x['stp_score'], reverse=True)
+            bucket_b_trending.sort(key=lambda x: x['stp_score'], reverse=True)
             
             top_a = [c['symbol'] for c in bucket_a_choppy[:SMC_RADAR_TOP_COINS]]
             top_b = [c['symbol'] for c in bucket_b_trending[:TREND_RADAR_TOP_COINS]]
