@@ -11,7 +11,7 @@ import pathlib
 import requests
 from datetime import datetime, timezone, date
 
-# ── 🔥 APEX V1.0: REGIME 15 VIP EDITION (5M MODE) 🔥 ──
+# ── 🔥 APEX V1.0: SYNAPSE TRAIL PRO EDITION (5M MODE) 🔥 ──
 market_data_cache = {}         
 active_ws_tasks = {}       
 active_watchlist = set()   
@@ -162,7 +162,7 @@ def is_correlated_position_active(symbol, direction):
                         return True
     return False
 
-# ── 🔥 TA MATH & REGIME 15 VIP LOGIC 🔥 ──
+# ── 🔥 TA MATH & SYNAPSE TRAIL PRO [WAT] LOGIC 🔥 ──
 def rma(series, length): return series.ewm(alpha=1/length, adjust=False).mean()
 
 def calc_atr(df, length):
@@ -170,52 +170,177 @@ def calc_atr(df, length):
     tr = pd.concat([df['high'] - df['low'], (df['high'] - prev_close).abs(), (df['low'] - prev_close).abs()], axis=1).max(axis=1)
     return rma(tr, length)
 
-def calc_wma(series, length):
-    w = np.arange(1, length + 1)
-    return series.rolling(length).apply(lambda x: np.dot(x, w) / w.sum(), raw=True)
-
-def algoalpha_baseline(df, period, factor, wma_len, ema_len, atr_col):
-    st_atr, hl2 = df[atr_col].values, ((df['high'] + df['low']) / 2).values
-    b_up, b_dn = hl2 + factor * st_atr, hl2 - factor * st_atr
-    upper, lower = np.zeros(len(df)), np.zeros(len(df))
-    close_vals = df['close'].values
-    upper[0], lower[0] = b_up[0], b_dn[0]
-    for i in range(1, len(df)):
-        if pd.isna(st_atr[i]):
-            upper[i], lower[i] = upper[i-1], lower[i-1]
+def calc_synapse_trail_pro(df):
+    """
+    Synapse Trail Pro [WillyAlgoTrader] Python Implementation
+    Matches screenshot settings precisely.
+    """
+    atr_len = 13
+    base_mult = 1.618
+    trail_len = 21
+    adx_len = 14
+    chop_len = 14
+    r2_len = 50
+    min_quality = 75
+    
+    # --- ATR & Volatility Rank ---
+    df['atr'] = calc_atr(df, atr_len)
+    
+    def calc_percentrank(x):
+        if len(x) <= 1: return 50.0
+        return (x < x.iloc[-1]).sum() / (len(x)-1) * 100.0
+        
+    df['vol_rank'] = df['atr'].rolling(100).apply(calc_percentrank, raw=False).fillna(50.0)
+    
+    def apply_adaptive_mult(rank):
+        if rank < 30: return 0.8
+        if rank > 70: return 1.25
+        return 1.0
+        
+    df['eff_mult'] = base_mult * df['vol_rank'].apply(apply_adaptive_mult)
+    
+    # --- Trail & Bands ---
+    df['trail_center'] = df['close'].ewm(span=trail_len, adjust=False).mean()
+    df['raw_upper'] = df['trail_center'] + df['atr'] * df['eff_mult']
+    df['raw_lower'] = df['trail_center'] - df['atr'] * df['eff_mult']
+    
+    n = len(df)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    direction = np.zeros(n)
+    
+    raw_u = df['raw_upper'].values
+    raw_l = df['raw_lower'].values
+    close = df['close'].values
+    
+    upper[0] = raw_u[0]
+    lower[0] = raw_l[0]
+    direction[0] = 1
+    
+    # Adaptive Ratchet Trail Logic
+    for i in range(1, n):
+        if np.isnan(raw_u[i]):
+            upper[i], lower[i], direction[i] = upper[i-1], lower[i-1], direction[i-1]
             continue
-        lower[i] = b_dn[i] if (b_dn[i] > lower[i-1] or close_vals[i-1] < lower[i-1]) else lower[i-1]
-        upper[i] = b_up[i] if (b_up[i] < upper[i-1] or close_vals[i-1] > upper[i-1]) else upper[i-1]
-    return calc_wma(pd.Series((lower + upper) / 2.0, index=df.index), wma_len).ewm(span=ema_len, adjust=False).mean()
+            
+        prev_u = upper[i-1] if not np.isnan(upper[i-1]) else raw_u[i]
+        prev_l = lower[i-1] if not np.isnan(lower[i-1]) else raw_l[i]
+        prev_dir = direction[i-1]
+        
+        # Direction Logic
+        if close[i] > prev_u:
+            curr_dir = 1
+        elif close[i] < prev_l:
+            curr_dir = -1
+        else:
+            curr_dir = prev_dir
+            
+        direction[i] = curr_dir
+        dir_flipped = (curr_dir != prev_dir)
+        
+        # Ratchet Logic
+        if curr_dir == 1:
+            lower[i] = raw_l[i] if dir_flipped else max(raw_l[i], prev_l)
+            upper[i] = raw_u[i]
+        elif curr_dir == -1:
+            upper[i] = raw_u[i] if dir_flipped else min(raw_u[i], prev_u)
+            lower[i] = raw_l[i]
+        else:
+            upper[i] = raw_u[i]
+            lower[i] = raw_l[i]
 
-def get_vip_settings(symbol):
-    # (st_factor, st_period, wma_length, ema_length, sl_multiplier)
-    return (2.5, 12, 15, 5, 1.5)
-
-def calc_propedge_pro(df, symbol):
-    st_f, st_p, wma_len, ema_len, _ = get_vip_settings(symbol)
-    df['pe_atr'] = calc_atr(df, st_p)
-    df['pe_tL'] = algoalpha_baseline(df, period=st_p, factor=st_f, wma_len=wma_len, ema_len=ema_len, atr_col='pe_atr')
+    df['upper'] = upper
+    df['lower'] = lower
+    df['dir'] = direction
     
-    st_trend = np.zeros(len(df))
-    tL = df['pe_tL'].values
-    for i in range(1, len(df)):
-        if pd.isna(tL[i]) or pd.isna(tL[i-1]): continue
-        if tL[i] > tL[i-1]: st_trend[i] = 1
-        elif tL[i] < tL[i-1]: st_trend[i] = -1
-        else: st_trend[i] = st_trend[i-1]
-    df['pe_st_trend'] = st_trend
-    df['pe_trend'] = df['pe_st_trend']
+    # --- Signal Triggers ---
+    df['buy_signal'] = (df['dir'] == 1) & (df['dir'].shift(1) == -1)
+    df['sell_signal'] = (df['dir'] == -1) & (df['dir'].shift(1) == 1)
     
-    df['pe_trend_bull'] = (df['pe_trend'] == 1) & (df['pe_trend'].shift(1) == 1) & (df['pe_trend'].shift(2) != 1)
-    df['pe_trend_bear'] = (df['pe_trend'] == -1) & (df['pe_trend'].shift(1) == -1) & (df['pe_trend'].shift(2) != -1)
-    df['pe_bull_entry'] = df['pe_trend_bull']
-    df['pe_bear_entry'] = df['pe_trend_bear']
+    # --- Filters: Regime Analysis ---
+    # 1. RSI (14)
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+    
+    # 2. ADX (14)
+    up = df['high'].diff()
+    down = -df['low'].diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = np.maximum(df['high'] - df['low'], np.maximum(abs(df['high'] - df['close'].shift()), abs(df['low'] - df['close'].shift())))
+    
+    atr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / atr14
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / atr14
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    df['adx'] = dx.ewm(alpha=1/14, adjust=False).mean()
+    df['adx_score'] = np.minimum(df['adx'] / 50.0 * 100.0, 100.0)
+    
+    # 3. Choppiness (14)
+    tr_sum = pd.Series(tr).rolling(chop_len).sum()
+    chop_range = df['high'].rolling(chop_len).max() - df['low'].rolling(chop_len).min()
+    chop_raw = 100 * np.log10(tr_sum / chop_range) / np.log10(chop_len)
+    df['chop_score'] = np.maximum(0.0, np.minimum(100.0, 100.0 - chop_raw))
+    
+    # 4. R2 (50)
+    def rolling_r2(y):
+        if len(y) < r2_len: return 0.0
+        r = np.corrcoef(np.arange(r2_len), y)[0, 1]
+        return (r**2) * 100.0 if not np.isnan(r) else 0.0
+        
+    df['r2_score'] = df['close'].rolling(r2_len).apply(rolling_r2, raw=True)
+    
+    # Composite Regime Score
+    df['regime_score'] = (df['adx_score'] * 0.40) + (df['chop_score'] * 0.35) + (df['r2_score'] * 0.25)
+    
+    # --- HTF Bias & Break Strength ---
+    # 100% Parity with Pine Script request.security("60", ta.ema(close, 50))
+    
+    # Temporarily set datetime index for resampling
+    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+    
+    # Resample to 1H, calculate 50 EMA, and merge back
+    df_1h = df.set_index('datetime').resample('1h').agg({'close': 'last'}).dropna()
+    df_1h['htf_ema'] = df_1h['close'].ewm(span=50, adjust=False).mean()
+    
+    # Map the 1H EMA back to the 5M timeframe and forward-fill
+    df = df.join(df_1h[['htf_ema']], on='datetime')
+    df['htf_ema'] = df['htf_ema'].ffill()
+    
+    df['htf_bull'] = df['close'] > df['htf_ema']
+    df['htf_bear'] = df['close'] < df['htf_ema']
+    
+    # Cleanup temporary datetime column
+    df.drop(columns=['datetime'], inplace=True)
+    
+    break_dist = np.where(df['dir'] == 1, df['close'] - df['upper'].shift(1), df['lower'].shift(1) - df['close'])
+    df['break_strength'] = np.minimum(abs(break_dist) / df['atr'], 3.0) / 3.0 * 100.0
+    
+    # --- Quality Score Generation ---
+    def get_q_score(row, is_buy):
+        htf_part = 30.0 if (is_buy and row['htf_bull']) or (not is_buy and row['htf_bear']) else (0.0 if (is_buy and row['htf_bear']) or (not is_buy and row['htf_bull']) else 15.0)
+        vol_part = 20.0 # Volume input turned off in screenshot -> defaults to 20
+        rsi_part = 20.0 if (is_buy and row['rsi'] > 50) or (not is_buy and row['rsi'] < 50) else 0.0
+        regime_part = row['regime_score'] * 0.20
+        break_part = row['break_strength'] * 0.10
+        return htf_part + vol_part + rsi_part + regime_part + break_part
+        
+    df['buy_quality'] = df.apply(lambda r: get_q_score(r, True) if r['buy_signal'] else np.nan, axis=1)
+    df['sell_quality'] = df.apply(lambda r: get_q_score(r, False) if r['sell_signal'] else np.nan, axis=1)
+    
+    # Final Passes (Minimum 75 Quality + Hard Skip Choppy (<35 Regime))
+    df['buy_pass'] = df['buy_signal'] & (df['buy_quality'] >= min_quality) & (df['regime_score'] >= 35)
+    df['sell_pass'] = df['sell_signal'] & (df['sell_quality'] >= min_quality) & (df['regime_score'] >= 35)
+    
     return df
 
 def seed_historical_data(symbol, tf):
     try:
-        bars = rest_exchange.fetch_ohlcv(symbol, tf, limit=300)
+        # Pulled 1000 bars to ensure the 1H EMA has enough data to warm up.
+        bars = rest_exchange.fetch_ohlcv(symbol, tf, limit=1000)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
         for c in ['open', 'high', 'low', 'close']: df[c] = df[c].astype(float)
         market_data_cache[f"{symbol}_{tf}"] = df
@@ -261,7 +386,6 @@ async def handle_closed_trade(sym, pos):
             
     base_sym = sym.split('/')[0]
     
-    # GUARANTEED PNL RESOLUTION (No fallback messages)
     if pnl is None:
         is_l = pos['direction'] == 'LONG'
         peak = pos.get('peak_px', pos['entry'])
@@ -342,7 +466,6 @@ async def dynamic_radar_loop():
                 else: coin_tiers[symbol] = {'tier': 3, 'max_spread': 0.35}
 
                 try:
-                    # 288 bars * 5m = 1440 minutes = 24h lookback window
                     bars = await asyncio.to_thread(rest_exchange.fetch_ohlcv, symbol, '5m', limit=288)
                     if not bars or len(bars) < 288: continue
                     
@@ -487,7 +610,7 @@ async def execute_trade_market(symbol, direction, risk_usd, trigger_px, sl_px, r
         
         main_msg = (f"BYBIT 5M:\n"
                     f"🎯 [{tier_grade}] {dir_icon}: {base_sym}\n"
-                    f"Type: ⚡ Market Execution (24/7)\n"
+                    f"Type: ⚡ STP Engine\n"
                     f"Regime: {regime}\n"
                     f"Quantity: {f_sz}\n"
                     f"Trigger: {trigger_px:.5f}\n"
@@ -532,89 +655,48 @@ async def analyze_structure(symbol):
         if is_correlated_position_active(symbol, 'SHORT') and allow_short: allow_short = False
 
         df_5m = market_data_cache.get(f"{symbol}_5m")
-        if df_5m is None or len(df_5m) < 60: return
+        # Ensure we have enough bars for the 1H EMA to stabilize
+        if df_5m is None or len(df_5m) < 850: return
         df_5m = df_5m.copy()
 
-        df_5m = calc_propedge_pro(df_5m, symbol)
-        c_vip = df_5m.iloc[-2]
+        df_5m = calc_synapse_trail_pro(df_5m)
+        c_bar = df_5m.iloc[-2] # Trigger off closed bar
+        
+        buy_signal = bool(c_bar['buy_pass'])
+        sell_signal = bool(c_bar['sell_pass'])
 
-        # ── Rejection Signal (STRONG - ▲▼ arrows) ──
-        # Price retested trend line and failed to break = continuation
-        rej_bull = False
-        rej_bear = False
-
-        trend_vals = df_5m['pe_trend'].values
-        tL_vals = df_5m['pe_tL'].values
-        high_vals = df_5m['high'].values
-        low_vals = df_5m['low'].values
-
-        # Count consecutive bars touching trend line (confirmation count = 2)
-        rejcount = 0
-        for i in range(-6, -1):  # last 5 closed bars on 5M structure
-            bar_touches = (
-                high_vals[i] > tL_vals[i] and 
-                low_vals[i] < tL_vals[i]
-            )
-            if bar_touches:
-                rejcount += 1
-            else:
-                rejcount = 0  # must be consecutive
-
-        rej_bull = rejcount >= 2 and trend_vals[-2] == 1
-        rej_bear = rejcount >= 2 and trend_vals[-2] == -1
-
-        # ── Trend Flip Signal (WEAK - label only) ──
-        flip_bull = bool(c_vip['pe_bull_entry']) or bool(c_vip['pe_trend_bull'])
-        flip_bear = bool(c_vip['pe_bear_entry']) or bool(c_vip['pe_trend_bear'])
-
-        # ── Signal Routing with Priority ──
-        if rej_bull:
+        if buy_signal:
             direction = "LONG"
-            signal_type = "REJECTION"      # Strong - always take
-            allocated_risk = allocated_risk  # Full risk
-        elif rej_bear:
+            signal_type = "STP Trend Continuation"      
+        elif sell_signal:
             direction = "SHORT"
-            signal_type = "REJECTION"
-            allocated_risk = allocated_risk
-        elif flip_bull:
-            direction = "LONG"
-            signal_type = "TREND_FLIP"     # Weak - reduced risk
-            allocated_risk = allocated_risk * 0.75  # Only 75% risk on flips
-        elif flip_bear:
-            direction = "SHORT"
-            signal_type = "TREND_FLIP"
-            allocated_risk = allocated_risk * 0.75
+            signal_type = "STP Trend Continuation"
         else:
-            return  # No signal
-
-        # ── Extra filter: skip weak flips if recent loss ──
-        if signal_type == "TREND_FLIP":
-            consecutive = daily_pnl_tracker.get('consecutive_losses', 0)
-            if consecutive >= 1:
-                log_terminal("🔍 FILTER", symbol, 
-                    "Trend flip skipped — consecutive loss active. Waiting for rejection signal only.")
-                return
+            return  
 
         if (direction == "LONG" and not allow_long) or (direction == "SHORT" and not allow_short): return
 
         pending_orders[symbol] = True
 
         tier_val = coin_tiers.get(symbol, {}).get('tier', 3)
-        tier_grade = "A+" if tier_val == 1 else ("B" if tier_val == 2 else "C")
-        regime = "Regime 15 (PropEdge VIP 5M)"
-        _, _, _, _, sl_m = get_vip_settings(symbol)
-        atr = float(c_vip['pe_atr'])
+        # Quality filter guarantees minimum 75 for it to even trigger.
+        tier_grade = "A+" if tier_val == 1 and max(c_bar['buy_quality'], c_bar['sell_quality']) > 85 else "A"
+        regime = f"Synapse Trail Pro [Regime Score: {c_bar['regime_score']:.1f}]"
+        
+        atr = float(c_bar['atr'])
         curr_px = float(df_5m['close'].iloc[-1])
         
         entry = curr_px
-        if direction == "LONG": sl = entry - (sl_m * atr)
-        else: sl = entry + (sl_m * atr)
+        sl_multiplier = 1.5 # From Input Settings (Custom SL xATR)
+        
+        if direction == "LONG": sl = entry - (sl_multiplier * atr)
+        else: sl = entry + (sl_multiplier * atr)
 
         target_rr = 2.0 
 
         await execute_trade_market(
             symbol, direction, allocated_risk, entry, sl, target_rr, 
-            regime, tier_grade, "Single TF (5M)", f"ST Trend: {direction} | Signal: {signal_type}"
+            regime, tier_grade, "Single TF (5M)", f"Dir: {direction} | QS: {max(c_bar['buy_quality'], c_bar['sell_quality']):.0f}/100"
         )
     finally:
         pending_orders.pop(symbol, None)
@@ -638,7 +720,8 @@ async def watch_ticker_stream(exchange, symbol):
                             columns=['ts', 'open', 'high', 'low', 'close', 'volume']
                         )
                         df = pd.concat([df, new_row], ignore_index=True)
-                        df = df.tail(300).reset_index(drop=True)
+                        # Keep 1000 bars to supply the 1H EMA requirement
+                        df = df.tail(1000).reset_index(drop=True)
                         market_data_cache[f"{symbol}_5m"] = df
                         await analyze_structure(symbol)
                     else:
@@ -696,7 +779,7 @@ async def fast_management_loop():
                     pos['peak_px'] = max(pos['peak_px'], cur_px) if is_l else min(pos['peak_px'], cur_px)
                     current_r = ((cur_px - pos['entry']) if is_l else (pos['entry'] - cur_px)) / pos['sl_distance']
 
-                    if 'Regime 15' in pos['regime_id']:
+                    if 'Synapse Trail Pro' in pos['regime_id']:
                         if current_r >= 1.5 and not pos.get('be_activated', False):
                             fee_buffer = pos['entry'] * 0.0011 
                             be_px = pos['entry'] + fee_buffer if is_l else pos['entry'] - fee_buffer
@@ -749,11 +832,11 @@ async def sync_open_positions_on_startup():
 async def main():
     os.system('cls' if os.name == 'nt' else 'clear') 
     print("======================================================")
-    print("  🤖 APEX V1.0 : REGIME 15 VIP (5M MODE)              ")
+    print("  🤖 APEX V1.0 : SYNAPSE TRAIL PRO (5M MODE)          ")
     print("======================================================\n")
     load_daily_pnl()
     await sync_open_positions_on_startup()
-    await send_telegram(f"🤖 <b>Apex V1.0 ONLINE</b>\nPropEdge VIP (Regime 15 - 5M) Active.")
+    await send_telegram(f"🤖 <b>Apex V1.0 ONLINE</b>\nSynapse Trail Pro [WAT] Active.")
     await asyncio.gather(dynamic_radar_loop(), fast_management_loop())
 
 if __name__ == '__main__':
