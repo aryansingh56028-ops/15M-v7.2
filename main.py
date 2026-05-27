@@ -41,7 +41,7 @@ MAX_CONCURRENT     = 5
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
-RADAR_TOP_COINS        = 10        
+RADAR_TOP_COINS        = 15        
 
 # Custom Watchlist 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'XRP/USDT:USDT', 'TRX/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'] 
@@ -115,7 +115,6 @@ def is_kill_switch_active() -> bool:
 def calc_precision_sniper(df):
     df = df.copy()
     
-    # VWAP FIX: Assign chronologically ordered DatetimeIndex
     df.index = pd.to_datetime(df['ts'], unit='ms')
     df.sort_index(inplace=True) 
     
@@ -125,7 +124,6 @@ def calc_precision_sniper(df):
     df.ta.rsi(length=14, append=True)
     df.ta.atr(length=20, append=True)
     
-    # ATR FIX: Dynamically standardize ATR column name regardless of pandas-ta version
     atr_col = [c for c in df.columns if c.startswith('ATR')][0]
     df.rename(columns={atr_col: 'ATR_20'}, inplace=True)
     
@@ -138,7 +136,6 @@ def calc_precision_sniper(df):
     df['swing_low'] = df['low'].rolling(10).min().shift(1)
     df['swing_high'] = df['high'].rolling(10).max().shift(1)
 
-    # HTF 1-Hour Logic
     df_1h = df.resample('1h').agg({'close': 'last'}).dropna()
     df_1h.ta.ema(length=9, append=True)
     df_1h.ta.ema(length=21, append=True)
@@ -239,7 +236,8 @@ async def analyze_structure(symbol):
         df_5m = market_data_cache.get(f"{symbol}_5m")
         if df_5m is None or len(df_5m) < 850: return
         
-        df = calc_precision_sniper(df_5m)
+        # 🚨 FIX: Multi-Threaded Math to unblock the host health checks
+        df = await asyncio.to_thread(calc_precision_sniper, df_5m)
         c_bar = df.iloc[-2] 
         
         if c_bar['buy_signal']:
@@ -372,16 +370,24 @@ async def dynamic_radar_loop():
         await asyncio.sleep(1800)
 
 # ── 🔥 KEEPALIVE DUMMY SERVER 🔥 ──
+async def health_check(request):
+    """Responds to any cloud host ping with a 200 OK status."""
+    return web.Response(text="200 OK - Precision Sniper Engine is ALIVE")
+
 async def dummy_web_server():
-    """Satisfies cloud providers that require a web port to be bound."""
     app = web.Application()
-    app.router.add_get('/', lambda request: web.Response(text="Precision Sniper Engine is ONLINE!"))
+    # 🚨 FIX: Bind catch-all routes so ANY health check passes immediately
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ping', health_check)
+    app.router.add_route('*', '/{tail:.*}', health_check) 
+    
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get('PORT', 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    stylish_log("SYSTEM", None, f"Dummy web server bound to port {port} to prevent container shutdown.")
+    stylish_log("SYSTEM", None, f"Dummy web server active on port {port}. Health checks will pass.")
 
 # ── 🔥 BOOT SEQUENCE 🔥 ──
 async def main():
@@ -392,11 +398,14 @@ async def main():
     load_daily_pnl()
     stylish_log("SYSTEM", None, "Booting Precision Engine & Async Websockets...")
     
-    # Start the dummy server to keep the cloud host happy
     await dummy_web_server() 
     
     await send_telegram(f"🎯 <b>Precision Sniper ONLINE</b>\nTick-Speed Manager Active.")
-    await asyncio.gather(dynamic_radar_loop(), equity_protection_loop())
+    
+    try:
+        await asyncio.gather(dynamic_radar_loop(), equity_protection_loop())
+    except Exception as e:
+        stylish_log("ERROR", None, f"Fatal loop crash: {e}")
 
 if __name__ == '__main__':
     try: asyncio.run(main())
