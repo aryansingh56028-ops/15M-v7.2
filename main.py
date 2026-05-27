@@ -112,6 +112,26 @@ async def send_telegram(text):
 def is_kill_switch_active() -> bool:
     return daily_pnl_tracker.get('equity_blown', False) or daily_pnl_tracker.get(date.today(), 0.0) <= DAILY_KILL_SWITCH
 
+# ── 🔥 BYBIT API HELPER 🔥 ──
+async def update_bybit_sl(symbol, new_sl):
+    """Forces Bybit to accept the trailing stop without silently failing."""
+    try:
+        f_sl = str(float(rest_exchange.price_to_precision(symbol, new_sl)))
+        await asyncio.to_thread(
+            rest_exchange.privatePostV5PositionTradingStop, 
+            {
+                'category': 'linear', 
+                'symbol': symbol.split(':')[0], 
+                'positionIdx': 0, 
+                'stopLoss': f_sl,
+                'tpslMode': 'Full'  # 🚨 Critical for Bybit V5 trailing logic
+            }
+        )
+        return True
+    except Exception as e:
+        stylish_log("ERROR", symbol, f"Failed to modify SL on exchange: {e}")
+        return False
+
 # ── 🔥 PRECISION SNIPER ENGINE [CRYPTO 24/7] 🔥 ──
 def calc_precision_sniper(df):
     df = df.copy()
@@ -208,22 +228,27 @@ async def execute_trade_market(symbol, direction, risk_usd, df_row):
         f_sz = float(rest_exchange.amount_to_precision(symbol, sz))
         f_sl = str(float(rest_exchange.price_to_precision(symbol, final_sl)))
         
+        # 🚨 FIX: Force physical TP3 onto the exchange for safety
+        f_tp3 = str(float(rest_exchange.price_to_precision(symbol, tp3_px)))
+        
         stylish_log("EXECUTING", symbol, f"{direction} Triggered. Sizing: {f_sz} | SL: {f_sl}")
         
         await asyncio.to_thread(
             rest_exchange.create_order,
             symbol=symbol, type='market', side=side, amount=f_sz, 
-            params={'stopLoss': f_sl, 'positionIdx': 0}
+            params={'stopLoss': f_sl, 'takeProfit': f_tp3, 'positionIdx': 0, 'tpslMode': 'Full'} 
         )
             
         open_positions[symbol] = {
             'direction': direction, 'entry': trigger_px, 'qty': f_sz,
+            'sl_dist': sl_dist,
             'sl': final_sl, 'trail_price': final_sl,
             'tp1': tp1_px, 'tp2': tp2_px, 'tp3': tp3_px,
             'tp1_hit': False, 'tp2_hit': False
         }
 
-        await send_telegram(f"🟢 <b>SNIPER ENTRY: {symbol}</b>\nDirection: {direction}\nEntry: {trigger_px}\nSL: {final_sl}\nTP1 (1R): {tp1_px}")
+        icon = "🟢" if direction == "LONG" else "🔴"
+        await send_telegram(f"{icon} <b>SNIPER ENTRY: {symbol}</b>\nDirection: {direction}\nEntry: {trigger_px:.4f}\nSL: {final_sl:.4f}\nTP1 (1R): {tp1_px:.4f}\nTP3 (3R): {tp3_px:.4f}")
 
     except Exception as e: stylish_log("ERROR", symbol, f"Execution failed: {e}")
 
@@ -264,32 +289,54 @@ async def watch_ticker_stream(exchange, symbol):
                 pos = open_positions[symbol]
                 is_l = pos['direction'] == 'LONG'
                 
+                # 1. TP3 Full Target Hit (Or Exchange closed it physically)
                 if (is_l and cur_px >= pos['tp3']) or (not is_l and cur_px <= pos['tp3']):
                     stylish_log("CLOSED", symbol, "TP3 Target Reached! Securing full 3R profit.")
-                    side = 'sell' if is_l else 'buy'
-                    asyncio.create_task(asyncio.to_thread(rest_exchange.create_order, symbol, 'market', side, pos['qty'], params={'reduceOnly': True}))
-                    asyncio.create_task(send_telegram(f"🏆 <b>TP3 HIT</b>: {symbol} closed for massive 3R gain."))
+                    
+                    captured_r = (cur_px - pos['entry']) / pos['sl_dist'] if is_l else (pos['entry'] - cur_px) / pos['sl_dist']
+                    trade_pnl_usd = captured_r * BASE_RISK_PER_TRADE
+                    daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
+                    save_daily_pnl()
+                    
+                    msg = f"🏆 <b>TP3 FULL TARGET: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {cur_px:.4f}\nCaptured: +{captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    asyncio.create_task(send_telegram(msg))
                     open_positions.pop(symbol)
                     
+                # 2. Ratchet to TP1
                 elif not pos.get('tp2_hit') and ((is_l and cur_px >= pos['tp2']) or (not is_l and cur_px <= pos['tp2'])):
                     stylish_log("MANAGING", symbol, "Price hit TP2. Trailing Stop Loss to TP1.")
                     pos['tp2_hit'] = True
                     pos['trail_price'] = pos['tp1']
-                    f_sl = str(float(rest_exchange.price_to_precision(symbol, pos['tp1'])))
-                    asyncio.create_task(asyncio.to_thread(rest_exchange.privatePostV5PositionTradingStop, {'category': 'linear', 'symbol': symbol.split(':')[0], 'positionIdx': 0, 'stopLoss': f_sl}))
-                    asyncio.create_task(send_telegram(f"🛡️ <b>STOP RATCHET: {symbol}</b>\nPrice hit 2R. Stop trailed to TP1. Profits locked."))
+                    
+                    asyncio.create_task(update_bybit_sl(symbol, pos['tp1']))
+                    
+                    msg = f"🛡️ <b>TP2 HIT: {symbol}</b>\nDirection: {pos['direction']}\nStatus: SL trailed to TP1 (+1.00R Locked)"
+                    asyncio.create_task(send_telegram(msg))
 
+                # 3. Ratchet to Breakeven
                 elif not pos.get('tp1_hit') and ((is_l and cur_px >= pos['tp1']) or (not is_l and cur_px <= pos['tp1'])):
                     stylish_log("MANAGING", symbol, "Price hit TP1. Trailing Stop Loss to Breakeven + Fees.")
                     pos['tp1_hit'] = True
                     be_px = pos['entry'] * 1.0015 if is_l else pos['entry'] * 0.9985
                     pos['trail_price'] = be_px
-                    f_sl = str(float(rest_exchange.price_to_precision(symbol, be_px)))
-                    asyncio.create_task(asyncio.to_thread(rest_exchange.privatePostV5PositionTradingStop, {'category': 'linear', 'symbol': symbol.split(':')[0], 'positionIdx': 0, 'stopLoss': f_sl}))
-                    asyncio.create_task(send_telegram(f"🎯 <b>TP1 HIT: {symbol}</b>\nStop trailed to entry. Risk free trade."))
+                    
+                    asyncio.create_task(update_bybit_sl(symbol, be_px))
+                    
+                    msg = f"🎯 <b>TP1 HIT: {symbol}</b>\nDirection: {pos['direction']}\nStatus: Breakeven Activated (Risk-Free)"
+                    asyncio.create_task(send_telegram(msg))
                 
+                # 4. SL or Trail Hit
                 elif (is_l and cur_px <= pos['trail_price']) or (not is_l and cur_px >= pos['trail_price']):
-                    stylish_log("CLOSED", symbol, "Stop Loss / Trail triggered.")
+                    stylish_log("CLOSED", symbol, "Stop Loss / Trail triggered on websocket.")
+                    
+                    captured_r = (pos['trail_price'] - pos['entry']) / pos['sl_dist'] if is_l else (pos['entry'] - pos['trail_price']) / pos['sl_dist']
+                    trade_pnl_usd = captured_r * BASE_RISK_PER_TRADE
+                    daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
+                    save_daily_pnl()
+                    
+                    icon = "🛑" if captured_r <= 0 else "🛡️"
+                    msg = f"{icon} <b>SL / TRAIL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    asyncio.create_task(send_telegram(msg))
                     open_positions.pop(symbol)
 
             df = market_data_cache.get(f"{symbol}_5m")
@@ -335,6 +382,22 @@ async def equity_protection_loop():
             for sym in list(open_positions.keys()):
                 base = sym.split(':')[0]
                 if base not in live_syms:
+                    pos = open_positions[sym]
+                    stylish_log("CLOSED", sym, "Position closed externally by exchange (SL Hit).")
+                    
+                    is_l = pos['direction'] == 'LONG'
+                    exit_px = pos['trail_price'] 
+                    
+                    captured_r = (exit_px - pos['entry']) / pos['sl_dist'] if is_l else (pos['entry'] - exit_px) / pos['sl_dist']
+                    trade_pnl_usd = captured_r * BASE_RISK_PER_TRADE
+                    
+                    daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
+                    save_daily_pnl()
+                    
+                    icon = "🛑" if captured_r <= 0 else "🛡️"
+                    msg = f"{icon} <b>EXCHANGE CLOSE: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    asyncio.create_task(send_telegram(msg))
+                    
                     open_positions.pop(sym, None)
                     
         except Exception: pass
@@ -371,7 +434,7 @@ async def dynamic_radar_loop():
         except Exception: pass
         await asyncio.sleep(1800)
 
-# ── 🔥 THREADED KEEPALIVE SERVER (THE FIX) 🔥 ──
+# ── 🔥 THREADED KEEPALIVE SERVER 🔥 ──
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -380,10 +443,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"200 OK - ALIVE")
 
     def log_message(self, format, *args):
-        pass # Suppress logging to keep terminal clean
+        pass 
 
 def start_health_server():
-    """Runs completely independently from the trading event loop."""
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     stylish_log("SYSTEM", None, f"Threaded health server active on port {port}.")
@@ -397,7 +459,6 @@ async def main():
     load_daily_pnl()
     stylish_log("SYSTEM", None, "Booting Precision Engine & Async Websockets...")
     
-    # Fire up the health server in a pure OS thread
     threading.Thread(target=start_health_server, daemon=True).start()
     
     await send_telegram(f"🎯 <b>Precision Sniper ONLINE</b>\nTick-Speed Manager Active.")
