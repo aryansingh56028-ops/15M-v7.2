@@ -41,7 +41,7 @@ MAX_CONCURRENT     = 5
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
-RADAR_TOP_COINS        = 15        
+RADAR_TOP_COINS        = 6        
 
 # Custom Watchlist 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'XRP/USDT:USDT', 'TRX/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'] 
