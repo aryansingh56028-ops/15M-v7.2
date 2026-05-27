@@ -5,7 +5,8 @@ import pandas_ta as ta
 import numpy as np
 import asyncio
 import aiohttp
-from aiohttp import web
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import os
 import gc
@@ -34,14 +35,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 # 🛡️ Prop Firm Risk Management
-DAILY_KILL_SWITCH  = -155.0   
-EQUITY_HARD_STOP   = -120.0   
-BASE_RISK_PER_TRADE = 25.0    
-MAX_CONCURRENT     = 5        
+DAILY_KILL_SWITCH  = -125.0   
+EQUITY_HARD_STOP   = -100.0   
+BASE_RISK_PER_TRADE = 30.0    
+MAX_CONCURRENT     = 3        
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
-RADAR_TOP_COINS        = 6        
+RADAR_TOP_COINS        = 10        
 
 # Custom Watchlist 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'XRP/USDT:USDT', 'TRX/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'] 
@@ -236,7 +237,6 @@ async def analyze_structure(symbol):
         df_5m = market_data_cache.get(f"{symbol}_5m")
         if df_5m is None or len(df_5m) < 850: return
         
-        # 🚨 FIX: Multi-Threaded Math to unblock the host health checks
         df = await asyncio.to_thread(calc_precision_sniper, df_5m)
         c_bar = df.iloc[-2] 
         
@@ -369,25 +369,24 @@ async def dynamic_radar_loop():
         except Exception: pass
         await asyncio.sleep(1800)
 
-# ── 🔥 KEEPALIVE DUMMY SERVER 🔥 ──
-async def health_check(request):
-    """Responds to any cloud host ping with a 200 OK status."""
-    return web.Response(text="200 OK - Precision Sniper Engine is ALIVE")
+# ── 🔥 THREADED KEEPALIVE SERVER 🔥 ──
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"200 OK - Precision Sniper Engine is ALIVE")
 
-async def dummy_web_server():
-    app = web.Application()
-    # 🚨 FIX: Bind catch-all routes so ANY health check passes immediately
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/ping', health_check)
-    app.router.add_route('*', '/{tail:.*}', health_check) 
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
+    def log_message(self, format, *args):
+        # Suppress HTTP logging so it doesn't spam your terminal
+        pass 
+
+def start_health_server():
+    """Runs a tiny web server in a pure OS thread to guarantee health checks pass."""
     port = int(os.environ.get('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    stylish_log("SYSTEM", None, f"Dummy web server active on port {port}. Health checks will pass.")
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    stylish_log("SYSTEM", None, f"Threaded health server active on port {port}.")
+    server.serve_forever()
 
 # ── 🔥 BOOT SEQUENCE 🔥 ──
 async def main():
@@ -398,7 +397,8 @@ async def main():
     load_daily_pnl()
     stylish_log("SYSTEM", None, "Booting Precision Engine & Async Websockets...")
     
-    await dummy_web_server() 
+    # Fire up the health server in a completely separate background thread
+    threading.Thread(target=start_health_server, daemon=True).start()
     
     await send_telegram(f"🎯 <b>Precision Sniper ONLINE</b>\nTick-Speed Manager Active.")
     
