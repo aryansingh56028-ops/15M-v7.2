@@ -33,14 +33,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 # 🛡️ Prop Firm Risk Management
-DAILY_KILL_SWITCH  = -135.0   
+DAILY_KILL_SWITCH  = -155.0   
 EQUITY_HARD_STOP   = -120.0   
 BASE_RISK_PER_TRADE = 25.0    
 MAX_CONCURRENT     = 5        
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
-RADAR_TOP_COINS        = 15        
+RADAR_TOP_COINS        = 20        
 
 # Custom Watchlist 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'XRP/USDT:USDT', 'TRX/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'] 
@@ -123,6 +123,11 @@ def calc_precision_sniper(df):
     df.ta.ema(length=55, append=True)
     df.ta.rsi(length=14, append=True)
     df.ta.atr(length=20, append=True)
+    
+    # ATR FIX: Dynamically standardize ATR column name regardless of pandas-ta version
+    atr_col = [c for c in df.columns if c.startswith('ATR')][0]
+    df.rename(columns={atr_col: 'ATR_20'}, inplace=True)
+    
     df.ta.macd(fast=12, slow=26, signal=9, append=True)
     df.ta.vwap(append=True)
     df.ta.adx(length=14, append=True)
@@ -132,7 +137,7 @@ def calc_precision_sniper(df):
     df['swing_low'] = df['low'].rolling(10).min().shift(1)
     df['swing_high'] = df['high'].rolling(10).max().shift(1)
 
-    # HTF 1-Hour Logic (Uses the DatetimeIndex directly)
+    # HTF 1-Hour Logic
     df_1h = df.resample('1h').agg({'close': 'last'}).dropna()
     df_1h.ta.ema(length=9, append=True)
     df_1h.ta.ema(length=21, append=True)
@@ -187,7 +192,7 @@ async def execute_trade_market(symbol, direction, risk_usd, df_row):
     side = 'buy' if direction == 'LONG' else 'sell'
     try:
         trigger_px = float(df_row['close'])
-        atr_val = float(df_row['ATRe_20'])
+        atr_val = float(df_row['ATR_20']) # Uses standardized name
         
         atr_risk = atr_val * 2.0
         atr_sl = trigger_px - atr_risk if direction == 'LONG' else trigger_px + atr_risk
