@@ -2,4 +2,6 @@ ccxt
 aiohttp
 pandas
 numpy
+pandas-ta
+requests
 python-dotenv
