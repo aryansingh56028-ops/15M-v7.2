@@ -4,13 +4,17 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import asyncio
+import aiohttp
 import time
 import os
 import gc
 import json
 import pathlib
-import requests
 from datetime import datetime, timezone, date
+from dotenv import load_dotenv
+
+# Load Environment Variables from .env file
+load_dotenv()
 
 # ── 🔥 PRECISION SNIPER CRYPTO 24/7 (TICK-SPEED EDITION) 🔥 ──
 market_data_cache = {}         
@@ -23,20 +27,20 @@ _tg_semaphore = None
 processing_symbols = set()   # 🔒 CONCURRENCY LOCK
 
 # ── Credentials & Config ───────────────────────────────────────────
-BYBIT_API_KEY    = "FOqGNCN6gRxu4bqMqF"      
-BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"   
-TELEGRAM_BOT_TOKEN = "8955584540:AAHw7vbnRTWyO5pGOyvyWiMlPiagv7qpmOQ"  
-TELEGRAM_CHAT_ID   = "1932328527"               
+BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 # 🛡️ Prop Firm Risk Management
 DAILY_KILL_SWITCH  = -125.0   
 EQUITY_HARD_STOP   = -100.0   
-BASE_RISK_PER_TRADE = 25.0    
-MAX_CONCURRENT     = 5        
+BASE_RISK_PER_TRADE = 30.0    
+MAX_CONCURRENT     = 3        
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
-RADAR_TOP_COINS        = 15        
+RADAR_TOP_COINS        = 10        
 
 # Custom Watchlist 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'XRP/USDT:USDT', 'TRX/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'] 
@@ -87,12 +91,20 @@ def save_daily_pnl():
         }))
     except Exception: pass
 
+# Pure Async Telegram Function (No Requests Library)
 async def send_telegram(text):
     global _tg_semaphore
     if _tg_semaphore is None: _tg_semaphore = asyncio.Semaphore(3)
+    
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    
     async with _tg_semaphore:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        try: await asyncio.to_thread(requests.post, url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': text.strip(), 'parse_mode': 'HTML'}, timeout=10)
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': text.strip(), 'parse_mode': 'HTML'}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=5) as response:
+                    await response.text() # Read response to close connection cleanly
         except Exception: pass
 
 def is_kill_switch_active() -> bool:
@@ -102,7 +114,6 @@ def is_kill_switch_active() -> bool:
 def calc_precision_sniper(df):
     df = df.copy()
     
-    # Core Indicators
     df.ta.ema(length=9, append=True)
     df.ta.ema(length=21, append=True)
     df.ta.ema(length=55, append=True)
@@ -114,11 +125,9 @@ def calc_precision_sniper(df):
     
     df['VOL_SMA'] = df['volume'].rolling(20).mean()
     
-    # Swing Structure (Lookback 10)
     df['swing_low'] = df['low'].rolling(10).min().shift(1)
     df['swing_high'] = df['high'].rolling(10).max().shift(1)
 
-    # 1H HTF Bias
     df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
     df_1h = df.set_index('datetime').resample('1h').agg({'close': 'last'}).dropna()
     df_1h.ta.ema(length=9, append=True)
@@ -130,7 +139,6 @@ def calc_precision_sniper(df):
     df['htf_bias'] = df['htf_bias'].ffill().fillna(0)
     df.drop(columns=['datetime'], inplace=True)
 
-    # Confluence Scoring
     df['bull_score'] = 0.0
     df['bull_score'] += np.where(df['EMA_9'] > df['EMA_21'], 1.0, 0.0)
     df['bull_score'] += np.where(df['close'] > df['EMA_55'], 1.0, 0.0)
@@ -155,7 +163,6 @@ def calc_precision_sniper(df):
     df['bear_score'] += np.where(df['htf_bias'] == -1, 1.5, 0.0)
     df['bear_score'] += np.where(df['close'] < df['EMA_9'], 0.5, 0.0)
 
-    # Entry Signals (Score >= 5.0)
     df['ema_bull_cross'] = (df['EMA_9'] > df['EMA_21']) & (df['EMA_9'].shift(1) <= df['EMA_21'].shift(1))
     df['ema_bear_cross'] = (df['EMA_9'] < df['EMA_21']) & (df['EMA_9'].shift(1) >= df['EMA_21'].shift(1))
 
@@ -179,7 +186,6 @@ async def execute_trade_market(symbol, direction, risk_usd, df_row):
         trigger_px = float(df_row['close'])
         atr_val = float(df_row['ATRe_20'])
         
-        # Crypto 24/7 uses 2.0 ATR for baseline risk
         atr_risk = atr_val * 2.0
         atr_sl = trigger_px - atr_risk if direction == 'LONG' else trigger_px + atr_risk
         
@@ -243,14 +249,12 @@ async def watch_ticker_stream(exchange, symbol):
             ohlcv = await exchange.watch_ohlcv(symbol, '5m')
             new_bar = ohlcv[0]
             bar_ts = int(new_bar[0])
-            cur_px = float(new_bar[4]) # LIVE TICK PRICE
+            cur_px = float(new_bar[4]) 
             
-            # 1. Tick-Speed Trade Management 
             if symbol in open_positions:
                 pos = open_positions[symbol]
                 is_l = pos['direction'] == 'LONG'
                 
-                # Check Catastrophic TP3 Close
                 if (is_l and cur_px >= pos['tp3']) or (not is_l and cur_px <= pos['tp3']):
                     stylish_log("CLOSED", symbol, "TP3 Target Reached! Securing full 3R profit.")
                     side = 'sell' if is_l else 'buy'
@@ -258,7 +262,6 @@ async def watch_ticker_stream(exchange, symbol):
                     asyncio.create_task(send_telegram(f"🏆 <b>TP3 HIT</b>: {symbol} closed for massive 3R gain."))
                     open_positions.pop(symbol)
                     
-                # Check Ratchet to TP1 (Triggered at TP2)
                 elif not pos.get('tp2_hit') and ((is_l and cur_px >= pos['tp2']) or (not is_l and cur_px <= pos['tp2'])):
                     stylish_log("MANAGING", symbol, "Price hit TP2. Trailing Stop Loss to TP1.")
                     pos['tp2_hit'] = True
@@ -267,7 +270,6 @@ async def watch_ticker_stream(exchange, symbol):
                     asyncio.create_task(asyncio.to_thread(rest_exchange.privatePostV5PositionTradingStop, {'category': 'linear', 'symbol': symbol.split(':')[0], 'positionIdx': 0, 'stopLoss': f_sl}))
                     asyncio.create_task(send_telegram(f"🛡️ <b>STOP RATCHET: {symbol}</b>\nPrice hit 2R. Stop trailed to TP1. Profits locked."))
 
-                # Check Ratchet to Breakeven (Triggered at TP1)
                 elif not pos.get('tp1_hit') and ((is_l and cur_px >= pos['tp1']) or (not is_l and cur_px <= pos['tp1'])):
                     stylish_log("MANAGING", symbol, "Price hit TP1. Trailing Stop Loss to Breakeven + Fees.")
                     pos['tp1_hit'] = True
@@ -277,12 +279,10 @@ async def watch_ticker_stream(exchange, symbol):
                     asyncio.create_task(asyncio.to_thread(rest_exchange.privatePostV5PositionTradingStop, {'category': 'linear', 'symbol': symbol.split(':')[0], 'positionIdx': 0, 'stopLoss': f_sl}))
                     asyncio.create_task(send_telegram(f"🎯 <b>TP1 HIT: {symbol}</b>\nStop trailed to entry. Risk free trade."))
                 
-                # Check Local SL Hit (Clean up dictionary if exchange closed it)
                 elif (is_l and cur_px <= pos['trail_price']) or (not is_l and cur_px >= pos['trail_price']):
                     stylish_log("CLOSED", symbol, "Stop Loss / Trail triggered.")
                     open_positions.pop(symbol)
 
-            # 2. DataFrame Construction for Entries
             df = market_data_cache.get(f"{symbol}_5m")
             if df is not None:
                 if bar_ts > last_seen_ts:
@@ -291,7 +291,6 @@ async def watch_ticker_stream(exchange, symbol):
                         df = pd.concat([df, new_row], ignore_index=True)
                         df = df.tail(1000).reset_index(drop=True)
                         market_data_cache[f"{symbol}_5m"] = df
-                        # Trigger analysis only when the candle formally closes
                         await analyze_structure(symbol)
                     else:
                         df.iloc[-1] = [new_bar[0], new_bar[1], new_bar[2], new_bar[3], cur_px, new_bar[5]]
@@ -306,7 +305,6 @@ async def watch_ticker_stream(exchange, symbol):
 
 # ── 🔥 EQUITY PROTECTION LOOP 🔥 ──
 async def equity_protection_loop():
-    """Runs quietly in the background to ensure Prop Firm DD limits are strictly respected."""
     while True:
         try:
             if daily_pnl_tracker.get('equity_blown', False):
@@ -324,7 +322,6 @@ async def equity_protection_loop():
                 stylish_log("PROTECT", None, f"Live equity ({live_equity:.2f}) breached hard stop. Halting.")
                 await send_telegram(f"🚨 <b>EQUITY CIRCUIT BREAKER</b> 🚨\nTotal Equity: {live_equity:.2f}\nTrading halted.")
                 
-            # Sync any externally closed positions
             live_syms = [p['symbol'] for p in pos_data if float(p.get('contracts', 0)) > 0]
             for sym in list(open_positions.keys()):
                 base = sym.split(':')[0]
