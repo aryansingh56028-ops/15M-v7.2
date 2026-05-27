@@ -5,6 +5,7 @@ import pandas_ta as ta
 import numpy as np
 import asyncio
 import aiohttp
+from aiohttp import web
 import time
 import os
 import gc
@@ -192,7 +193,7 @@ async def execute_trade_market(symbol, direction, risk_usd, df_row):
     side = 'buy' if direction == 'LONG' else 'sell'
     try:
         trigger_px = float(df_row['close'])
-        atr_val = float(df_row['ATR_20']) # Uses standardized name
+        atr_val = float(df_row['ATR_20'])
         
         atr_risk = atr_val * 2.0
         atr_sl = trigger_px - atr_risk if direction == 'LONG' else trigger_px + atr_risk
@@ -370,6 +371,18 @@ async def dynamic_radar_loop():
         except Exception: pass
         await asyncio.sleep(1800)
 
+# ── 🔥 KEEPALIVE DUMMY SERVER 🔥 ──
+async def dummy_web_server():
+    """Satisfies cloud providers that require a web port to be bound."""
+    app = web.Application()
+    app.router.add_get('/', lambda request: web.Response(text="Precision Sniper Engine is ONLINE!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    stylish_log("SYSTEM", None, f"Dummy web server bound to port {port} to prevent container shutdown.")
+
 # ── 🔥 BOOT SEQUENCE 🔥 ──
 async def main():
     os.system('cls' if os.name == 'nt' else 'clear') 
@@ -378,6 +391,10 @@ async def main():
     print("======================================================\n")
     load_daily_pnl()
     stylish_log("SYSTEM", None, "Booting Precision Engine & Async Websockets...")
+    
+    # Start the dummy server to keep the cloud host happy
+    await dummy_web_server() 
+    
     await send_telegram(f"🎯 <b>Precision Sniper ONLINE</b>\nTick-Speed Manager Active.")
     await asyncio.gather(dynamic_radar_loop(), equity_protection_loop())
 
