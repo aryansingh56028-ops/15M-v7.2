@@ -5,8 +5,7 @@ import pandas_ta as ta
 import numpy as np
 import asyncio
 import aiohttp
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from aiohttp import web
 import time
 import os
 import gc
@@ -18,7 +17,7 @@ from dotenv import load_dotenv
 # Load Environment Variables from .env file
 load_dotenv()
 
-# ── 🔥 PRECISION SNIPER CRYPTO 24/7 (TICK-SPEED EDITION) 🔥 ──
+# ── 🔥 PRECISION SNIPER CRYPTO 24/7 (CLOUD-PROOF EDITION) 🔥 ──
 market_data_cache = {}         
 active_ws_tasks = {}       
 active_watchlist = set()   
@@ -26,7 +25,8 @@ coin_tiers = {}
 PNL_FILE = 'daily_pnl.json'
 
 _tg_semaphore = None
-processing_symbols = set()   # 🔒 CONCURRENCY LOCK
+_math_semaphore = asyncio.Semaphore(1) # 🚨 FIX: Prevents 100% CPU spikes on cloud hosts
+processing_symbols = set()   
 
 # ── Credentials & Config ───────────────────────────────────────────
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY")
@@ -35,10 +35,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 # 🛡️ Prop Firm Risk Management
-DAILY_KILL_SWITCH  = -125.0   
-EQUITY_HARD_STOP   = -100.0   
-BASE_RISK_PER_TRADE = 30.0    
-MAX_CONCURRENT     = 3        
+DAILY_KILL_SWITCH  = -155.0   
+EQUITY_HARD_STOP   = -120.0   
+BASE_RISK_PER_TRADE = 25.0    
+MAX_CONCURRENT     = 5        
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
@@ -93,7 +93,6 @@ def save_daily_pnl():
         }))
     except Exception: pass
 
-# Pure Async Telegram Function
 async def send_telegram(text):
     global _tg_semaphore
     if _tg_semaphore is None: _tg_semaphore = asyncio.Semaphore(3)
@@ -133,7 +132,6 @@ def calc_precision_sniper(df):
     df.ta.adx(length=14, append=True)
     
     df['VOL_SMA'] = df['volume'].rolling(20).mean()
-    
     df['swing_low'] = df['low'].rolling(10).min().shift(1)
     df['swing_high'] = df['high'].rolling(10).max().shift(1)
 
@@ -237,7 +235,11 @@ async def analyze_structure(symbol):
         df_5m = market_data_cache.get(f"{symbol}_5m")
         if df_5m is None or len(df_5m) < 850: return
         
-        df = await asyncio.to_thread(calc_precision_sniper, df_5m)
+        # 🚨 FIX: Strict concurrency limit to prevent cloud CPU lockups
+        global _math_semaphore
+        async with _math_semaphore:
+            df = await asyncio.to_thread(calc_precision_sniper, df_5m)
+            
         c_bar = df.iloc[-2] 
         
         if c_bar['buy_signal']:
@@ -361,7 +363,7 @@ async def dynamic_radar_loop():
                     await asyncio.to_thread(seed_historical_data, sym, '5m') 
                     task = asyncio.create_task(watch_ticker_stream(ws_exchange, sym))
                     active_ws_tasks[sym] = task
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(1.5) # 🚨 FIX: 1.5s stagger protects against Bybit disconnects
                     
             active_watchlist = new_watchlist
             stylish_log("RADAR", None, f"Sweep complete. Watching {len(active_watchlist)} assets.")
@@ -369,36 +371,31 @@ async def dynamic_radar_loop():
         except Exception: pass
         await asyncio.sleep(1800)
 
-# ── 🔥 THREADED KEEPALIVE SERVER 🔥 ──
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"200 OK - Precision Sniper Engine is ALIVE")
+# ── 🔥 KEEPALIVE DUMMY SERVER 🔥 ──
+async def health_check(request):
+    return web.Response(text="200 OK - Precision Sniper Engine is ALIVE")
 
-    def log_message(self, format, *args):
-        # Suppress HTTP logging so it doesn't spam your terminal
-        pass 
-
-def start_health_server():
-    """Runs a tiny web server in a pure OS thread to guarantee health checks pass."""
+async def dummy_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_route('*', '/{tail:.*}', health_check) 
+    runner = web.AppRunner(app)
+    await runner.setup()
     port = int(os.environ.get('PORT', 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    stylish_log("SYSTEM", None, f"Threaded health server active on port {port}.")
-    server.serve_forever()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    stylish_log("SYSTEM", None, f"Async health server active on port {port}.")
 
 # ── 🔥 BOOT SEQUENCE 🔥 ──
 async def main():
-    os.system('cls' if os.name == 'nt' else 'clear') 
     print("======================================================")
-    print("  🎯 PRECISION SNIPER CRYPTO 24/7 (TICK-SPEED EDITION)")
+    print("  🎯 PRECISION SNIPER CRYPTO 24/7 (CLOUD-PROOF EDITION)")
     print("======================================================\n")
     load_daily_pnl()
     stylish_log("SYSTEM", None, "Booting Precision Engine & Async Websockets...")
     
-    # Fire up the health server in a completely separate background thread
-    threading.Thread(target=start_health_server, daemon=True).start()
+    await dummy_web_server() 
     
     await send_telegram(f"🎯 <b>Precision Sniper ONLINE</b>\nTick-Speed Manager Active.")
     
