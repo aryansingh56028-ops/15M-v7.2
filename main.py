@@ -33,14 +33,14 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 # 🛡️ Prop Firm Risk Management
-DAILY_KILL_SWITCH  = -125.0   
-EQUITY_HARD_STOP   = -100.0   
-BASE_RISK_PER_TRADE = 30.0    
-MAX_CONCURRENT     = 3        
+DAILY_KILL_SWITCH  = -135.0   
+EQUITY_HARD_STOP   = -120.0   
+BASE_RISK_PER_TRADE = 25.0    
+MAX_CONCURRENT     = 5        
 
 # 📡 Radar & Watchlist
 TREND_MIN_VOLUME       = 50000000   
-RADAR_TOP_COINS        = 10        
+RADAR_TOP_COINS        = 15        
 
 # Custom Watchlist 
 VIP_SYMBOLS = ['BTC/USDT:USDT', 'XRP/USDT:USDT', 'TRX/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'] 
@@ -91,7 +91,7 @@ def save_daily_pnl():
         }))
     except Exception: pass
 
-# Pure Async Telegram Function (No Requests Library)
+# Pure Async Telegram Function
 async def send_telegram(text):
     global _tg_semaphore
     if _tg_semaphore is None: _tg_semaphore = asyncio.Semaphore(3)
@@ -104,7 +104,7 @@ async def send_telegram(text):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=5) as response:
-                    await response.text() # Read response to close connection cleanly
+                    await response.text() 
         except Exception: pass
 
 def is_kill_switch_active() -> bool:
@@ -113,6 +113,10 @@ def is_kill_switch_active() -> bool:
 # ── 🔥 PRECISION SNIPER ENGINE [CRYPTO 24/7] 🔥 ──
 def calc_precision_sniper(df):
     df = df.copy()
+    
+    # VWAP FIX: Assign chronologically ordered DatetimeIndex
+    df.index = pd.to_datetime(df['ts'], unit='ms')
+    df.sort_index(inplace=True) 
     
     df.ta.ema(length=9, append=True)
     df.ta.ema(length=21, append=True)
@@ -128,16 +132,15 @@ def calc_precision_sniper(df):
     df['swing_low'] = df['low'].rolling(10).min().shift(1)
     df['swing_high'] = df['high'].rolling(10).max().shift(1)
 
-    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
-    df_1h = df.set_index('datetime').resample('1h').agg({'close': 'last'}).dropna()
+    # HTF 1-Hour Logic (Uses the DatetimeIndex directly)
+    df_1h = df.resample('1h').agg({'close': 'last'}).dropna()
     df_1h.ta.ema(length=9, append=True)
     df_1h.ta.ema(length=21, append=True)
     df_1h['htf_bias'] = np.where(df_1h['EMA_9'] > df_1h['EMA_21'], 1, np.where(df_1h['EMA_9'] < df_1h['EMA_21'], -1, 0))
     df_1h['htf_bias'] = df_1h['htf_bias'].shift(1) 
     
-    df = df.join(df_1h[['htf_bias']], on='datetime')
+    df = df.join(df_1h[['htf_bias']])
     df['htf_bias'] = df['htf_bias'].ffill().fillna(0)
-    df.drop(columns=['datetime'], inplace=True)
 
     df['bull_score'] = 0.0
     df['bull_score'] += np.where(df['EMA_9'] > df['EMA_21'], 1.0, 0.0)
