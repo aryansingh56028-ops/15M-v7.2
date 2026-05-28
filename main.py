@@ -102,12 +102,10 @@ async def handle_signal_entry(data):
     action = data.get('action') # "buy" or "sell"
     raw_ticker = data.get('ticker', '')
     
-    # Format ticker cleanly for ccxt (e.g., BTCUSDT -> BTC/USDT:USDT)
-    if "/" not in raw_ticker:
-        base_currency = raw_ticker.replace("USDT", "")
-        symbol = f"{base_currency}/USDT:USDT"
-    else:
-        symbol = raw_ticker
+    # Format ticker cleanly for ccxt (Removes BYBIT: prefix and .P suffix)
+    clean_ticker = raw_ticker.split(':')[-1] 
+    clean_ticker = clean_ticker.replace('.P', '').replace('USDT', '')
+    symbol = f"{clean_ticker}/USDT:USDT"
 
     if is_kill_switch_active():
         stylish_log("PROTECT", symbol, "Signal skipped. Daily risk limit breached.")
@@ -146,15 +144,16 @@ async def handle_signal_entry(data):
             'tp1': tp1, 'tp2': tp2, 'tp3': tp3
         }
 
-        icon = "🎯 🟢" if direction == "LONG" else "🎯 🔴"
-        msg = f"{icon} <b>NEW LIVE SIGNAL CONFIGURED: {symbol}</b>\n\n" \
+        # Vertical Telegram Message formatting
+        icon = "🎯 🟢 LONG" if direction == "LONG" else "🎯 🔴 SHORT"
+        msg = f"<b>{icon}:</b> {symbol}\n" \
               f"<b>Type:</b> ⚡ Market Execution (24/7)\n" \
               f"<b>Entry:</b> {entry_price:.4f}\n" \
               f"<b>SL:</b> {sl:.4f}\n" \
-              f"<b>TP1 (1R):</b> {tp1:.4f}\n" \
-              f"<b>TP2 (2R):</b> {tp2:.4f}\n" \
-              f"<b>TP3 (3R):</b> {tp3:.4f}\n" \
-              f"<b>Management:</b> 1:1 risk reward profile active."
+              f"<b>TP (1R):</b> {tp1:.4f}\n" \
+              f"<b>TP (2R):</b> {tp2:.4f}\n" \
+              f"<b>TP (3R):</b> {tp3:.4f}\n" \
+              f"<b>Management:</b> SL trails to BE after TP1, to TP1 after TP2."
         await send_telegram(msg)
 
     except Exception as e:
@@ -164,28 +163,34 @@ async def handle_signal_entry(data):
 async def handle_management_event(data):
     event = data.get('event')
     raw_ticker = data.get('ticker', '')
-    symbol = f"{raw_ticker.replace('USDT', '')}/USDT:USDT" if "/" not in raw_ticker else raw_ticker
+    
+    # Format ticker cleanly for ccxt
+    clean_ticker = raw_ticker.split(':')[-1] 
+    clean_ticker = clean_ticker.replace('.P', '').replace('USDT', '')
+    symbol = f"{clean_ticker}/USDT:USDT"
 
     if symbol not in open_positions:
         return
 
     pos = open_positions[symbol]
-    is_long = pos['direction'] == "LONG"
 
     if event == "tp1_hit":
-        # Trailing stop moves to Breakeven
         stylish_log("MANAGING", symbol, "Indicator confirmed TP1 hit. Protecting capital via Breakeven.")
         await update_exchange_sl(symbol, pos['entry'])
-        await send_telegram(f"🛡️ <b>MANAGEMENT UPDATE: {symbol}</b>\nTP1 reached. Stop loss ratcheted to Breakeven (+0.00R locked).")
+        msg = f"🛡️ <b>UPDATE: {symbol}</b>\n" \
+              f"<b>Event:</b> 🎯 TP1 Hit (1R Secured)\n" \
+              f"<b>Action:</b> SL moved to Breakeven"
+        await send_telegram(msg)
 
     elif event == "tp2_hit":
-        # Trailing stop moves to TP1 target level
         stylish_log("MANAGING", symbol, "Indicator confirmed TP2 hit. Securing profits at TP1.")
         await update_exchange_sl(symbol, pos['tp1'])
-        await send_telegram(f"🛡️ <b>MANAGEMENT UPDATE: {symbol}</b>\nTP2 reached. Stop loss trailed to TP1 (+1.00R locked).")
+        msg = f"🛡️ <b>UPDATE: {symbol}</b>\n" \
+              f"<b>Event:</b> 🎯 TP2 Hit (2R Secured)\n" \
+              f"<b>Action:</b> SL trailed to TP1"
+        await send_telegram(msg)
 
     elif event in ["tp3_hit", "sl_hit"]:
-        # Order closed natively on exchange, update state and track metrics
         status = "PROFIT TARGET THREE SECURED" if event == "tp3_hit" else "STOP LOSS HIT"
         stylish_log("CLOSED", symbol, f"Trade completed via event: {event}")
         
@@ -195,7 +200,12 @@ async def handle_management_event(data):
         save_daily_pnl()
         
         icon = "🏆" if event == "tp3_hit" else "🛑"
-        await send_telegram(f"{icon} <b>POSITION CLOSED: {symbol}</b>\nReason: {status}\nRealized PnL Multiplier: {pnl_multiplier:+.2f}R")
+        event_name = "TP3 Hit (Full Profit)" if event == "tp3_hit" else "SL Hit"
+        msg = f"{icon} <b>POSITION CLOSED: {symbol}</b>\n" \
+              f"<b>Event:</b> {event_name}\n" \
+              f"<b>Realized PnL:</b> {pnl_multiplier:+.2f}R"
+        await send_telegram(msg)
+        
         open_positions.pop(symbol, None)
 
 # ── 🔥 WEBHOOK SERVER ROUTING 🔥 ──
