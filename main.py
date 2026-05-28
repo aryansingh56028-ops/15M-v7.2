@@ -69,7 +69,8 @@ def stylish_log(action_type, symbol, message):
     icons = {
         "SCANNING": "👀", "FOUND": "🎯", "SKIPPED": "⏭️",
         "EXECUTING": "⚡", "MANAGING": "🛡️", "CLOSED": "💰",
-        "ERROR": "❌", "RADAR": "📡", "SYSTEM": "💻", "PROTECT": "🛑"
+        "ERROR": "❌", "RADAR": "📡", "SYSTEM": "💻", "PROTECT": "🛑",
+        "HEARTBEAT": "💓"
     }
     icon = icons.get(action_type, "🔹")
     action_padded = f"[{icon} {action_type}]".ljust(15)
@@ -220,8 +221,6 @@ async def execute_trade_market(symbol, direction, risk_usd, df_row):
         
         sl_dist = abs(trigger_px - final_sl)
         
-        # 🚨 FIX: Account for round-trip Bybit taker fees (0.06% + 0.06% = ~0.12%)
-        # This guarantees your risk is EXACTLY 25.00 USD, preventing size drift.
         fee_buffer = trigger_px * 0.0012 
         true_risk_dist = sl_dist + fee_buffer
         
@@ -276,7 +275,10 @@ async def analyze_structure(symbol):
         elif c_bar['sell_signal']:
             stylish_log("FOUND", symbol, f"SHORT Setup Confirmed. Score: {c_bar['bear_score']}/10")
             await execute_trade_market(symbol, "SHORT", BASE_RISK_PER_TRADE, c_bar)
-    finally: processing_symbols.discard(symbol)
+    except Exception as e:
+        stylish_log("ERROR", symbol, f"Analysis crash: {e}")
+    finally: 
+        processing_symbols.discard(symbol)
 
 # ── 🔥 ASYNC WEBSOCKET ENGINE (TICK-SPEED MANAGER) 🔥 ──
 async def watch_ticker_stream(exchange, symbol):
@@ -301,7 +303,6 @@ async def watch_ticker_stream(exchange, symbol):
                     daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
                     save_daily_pnl()
                     
-                    # 🚨 Specific Exact Message formatting
                     msg = f"🏆 <b>TP3 HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {cur_px:.4f}\nCaptured: +{captured_r:.2f}R (~${trade_pnl_usd:.2f})"
                     asyncio.create_task(send_telegram(msg))
                     open_positions.pop(symbol)
@@ -338,12 +339,8 @@ async def watch_ticker_stream(exchange, symbol):
                     daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
                     save_daily_pnl()
                     
-                    # 🚨 Exact SL/Trail messaging
-                    if captured_r <= 0:
-                        msg = f"🛑 <b>SL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
-                    else:
-                        msg = f"🛡️ <b>TRAIL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
-                    
+                    icon = "🛑" if captured_r <= 0 else "🛡️"
+                    msg = f"{icon} <b>SL / TRAIL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
                     asyncio.create_task(send_telegram(msg))
                     open_positions.pop(symbol)
 
@@ -365,10 +362,13 @@ async def watch_ticker_stream(exchange, symbol):
                     market_data_cache[f"{symbol}_5m"] = df
                     
         except asyncio.CancelledError: break 
-        except Exception: await asyncio.sleep(2)
+        except Exception as e:
+            stylish_log("ERROR", symbol, f"Stream tick error: {e}")
+            await asyncio.sleep(2)
 
 # ── 🔥 EQUITY PROTECTION LOOP 🔥 ──
 async def equity_protection_loop():
+    heartbeat_counter = 0
     while True:
         try:
             if daily_pnl_tracker.get('equity_blown', False):
@@ -402,17 +402,19 @@ async def equity_protection_loop():
                     daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
                     save_daily_pnl()
                     
-                    # 🚨 Exact SL/Trail messaging for Equity Loop
-                    if captured_r <= 0:
-                        msg = f"🛑 <b>SL HIT: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
-                    else:
-                        msg = f"🛡️ <b>TRAIL HIT: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
-                    
+                    icon = "🛑" if captured_r <= 0 else "🛡️"
+                    msg = f"{icon} <b>EXCHANGE CLOSE: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
                     asyncio.create_task(send_telegram(msg))
                     
                     open_positions.pop(sym, None)
+            
+            heartbeat_counter += 1
+            if heartbeat_counter >= 30: 
+                stylish_log("HEARTBEAT", None, f"Bot Active | Watching: {len(active_ws_tasks)} pairs | Trades: {len(open_positions)} | Live Equity: ${live_equity:.2f}")
+                heartbeat_counter = 0
                     
-        except Exception: pass
+        except Exception as e:
+            stylish_log("ERROR", "EQUITY", f"Protection loop error: {e}")
         await asyncio.sleep(10)
 
 # ── 🔥 DYNAMIC RADAR 🔥 ──
@@ -444,7 +446,8 @@ async def dynamic_radar_loop():
             stylish_log("RADAR", None, f"Sweep complete. Watching {len(active_watchlist)} assets.")
             await asyncio.to_thread(gc.collect)
         except Exception: pass
-        await asyncio.sleep(1800)
+        # 🚨 FIX: Radar loop now runs every 5 minutes (300 seconds) 
+        await asyncio.sleep(300)
 
 # ── 🔥 THREADED KEEPALIVE SERVER 🔥 ──
 class HealthCheckHandler(BaseHTTPRequestHandler):
