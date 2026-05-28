@@ -26,7 +26,7 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 # 🛡️ Prop Firm Risk Management
 DAILY_KILL_SWITCH   = -155.0   
 EQUITY_HARD_STOP    = -120.0   
-BASE_RISK_PER_TRADE = 50.0    # Adjusted to $50 per trade configuration
+BASE_RISK_PER_TRADE = 20.0    # Adjusted to $50 per trade configuration
 
 # Initialize Bybit REST Connection
 exchange = ccxt.bybit({
