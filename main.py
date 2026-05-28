@@ -124,7 +124,7 @@ async def update_bybit_sl(symbol, new_sl):
                 'symbol': symbol.split(':')[0], 
                 'positionIdx': 0, 
                 'stopLoss': f_sl,
-                'tpslMode': 'Full'  # 🚨 Critical for Bybit V5 trailing logic
+                'tpslMode': 'Full'  
             }
         )
         return True
@@ -220,15 +220,18 @@ async def execute_trade_market(symbol, direction, risk_usd, df_row):
         
         sl_dist = abs(trigger_px - final_sl)
         
+        # 🚨 FIX: Account for round-trip Bybit taker fees (0.06% + 0.06% = ~0.12%)
+        # This guarantees your risk is EXACTLY 25.00 USD, preventing size drift.
+        fee_buffer = trigger_px * 0.0012 
+        true_risk_dist = sl_dist + fee_buffer
+        
         tp1_px = trigger_px + (sl_dist * 1.0) if direction == 'LONG' else trigger_px - (sl_dist * 1.0)
         tp2_px = trigger_px + (sl_dist * 2.0) if direction == 'LONG' else trigger_px - (sl_dist * 2.0)
         tp3_px = trigger_px + (sl_dist * 3.0) if direction == 'LONG' else trigger_px - (sl_dist * 3.0)
 
-        sz = risk_usd / sl_dist
+        sz = risk_usd / true_risk_dist
         f_sz = float(rest_exchange.amount_to_precision(symbol, sz))
         f_sl = str(float(rest_exchange.price_to_precision(symbol, final_sl)))
-        
-        # 🚨 FIX: Force physical TP3 onto the exchange for safety
         f_tp3 = str(float(rest_exchange.price_to_precision(symbol, tp3_px)))
         
         stylish_log("EXECUTING", symbol, f"{direction} Triggered. Sizing: {f_sz} | SL: {f_sl}")
@@ -289,7 +292,7 @@ async def watch_ticker_stream(exchange, symbol):
                 pos = open_positions[symbol]
                 is_l = pos['direction'] == 'LONG'
                 
-                # 1. TP3 Full Target Hit (Or Exchange closed it physically)
+                # 1. TP3 Full Target Hit 
                 if (is_l and cur_px >= pos['tp3']) or (not is_l and cur_px <= pos['tp3']):
                     stylish_log("CLOSED", symbol, "TP3 Target Reached! Securing full 3R profit.")
                     
@@ -298,7 +301,8 @@ async def watch_ticker_stream(exchange, symbol):
                     daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
                     save_daily_pnl()
                     
-                    msg = f"🏆 <b>TP3 FULL TARGET: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {cur_px:.4f}\nCaptured: +{captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    # 🚨 Specific Exact Message formatting
+                    msg = f"🏆 <b>TP3 HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {cur_px:.4f}\nCaptured: +{captured_r:.2f}R (~${trade_pnl_usd:.2f})"
                     asyncio.create_task(send_telegram(msg))
                     open_positions.pop(symbol)
                     
@@ -310,7 +314,7 @@ async def watch_ticker_stream(exchange, symbol):
                     
                     asyncio.create_task(update_bybit_sl(symbol, pos['tp1']))
                     
-                    msg = f"🛡️ <b>TP2 HIT: {symbol}</b>\nDirection: {pos['direction']}\nStatus: SL trailed to TP1 (+1.00R Locked)"
+                    msg = f"🎯 <b>TP2 HIT: {symbol}</b>\nDirection: {pos['direction']}\nStatus: SL trailed to TP1 (+1.00R Locked)"
                     asyncio.create_task(send_telegram(msg))
 
                 # 3. Ratchet to Breakeven
@@ -334,8 +338,12 @@ async def watch_ticker_stream(exchange, symbol):
                     daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
                     save_daily_pnl()
                     
-                    icon = "🛑" if captured_r <= 0 else "🛡️"
-                    msg = f"{icon} <b>SL / TRAIL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    # 🚨 Exact SL/Trail messaging
+                    if captured_r <= 0:
+                        msg = f"🛑 <b>SL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    else:
+                        msg = f"🛡️ <b>TRAIL HIT: {symbol}</b>\nDirection: {pos['direction']}\nExit Price: {pos['trail_price']:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    
                     asyncio.create_task(send_telegram(msg))
                     open_positions.pop(symbol)
 
@@ -394,8 +402,12 @@ async def equity_protection_loop():
                     daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl_usd
                     save_daily_pnl()
                     
-                    icon = "🛑" if captured_r <= 0 else "🛡️"
-                    msg = f"{icon} <b>EXCHANGE CLOSE: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    # 🚨 Exact SL/Trail messaging for Equity Loop
+                    if captured_r <= 0:
+                        msg = f"🛑 <b>SL HIT: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    else:
+                        msg = f"🛡️ <b>TRAIL HIT: {sym}</b>\nDirection: {pos['direction']}\nApprox Exit: {exit_px:.4f}\nCaptured: {captured_r:.2f}R (~${trade_pnl_usd:.2f})"
+                    
                     asyncio.create_task(send_telegram(msg))
                     
                     open_positions.pop(sym, None)
