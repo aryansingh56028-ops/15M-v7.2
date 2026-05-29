@@ -23,11 +23,10 @@ BYBIT_API_SECRET   = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-# 🛡️ Prop Firm Risk Management & Protection Filters
+# 🛡️ Prop Firm Risk Management
 DAILY_KILL_SWITCH   = -155.0   
 EQUITY_HARD_STOP    = -120.0   
-BASE_RISK_PER_TRADE = 25.0    
-MIN_SL_PCT          = 0.003   # 0.3% Minimum SL distance threshold to prevent fee bleeding
+BASE_RISK_PER_TRADE = 15.0    # Adjusted to $15 per trade configuration
 
 # Initialize Bybit REST Connection
 exchange = ccxt.bybit({
@@ -36,7 +35,7 @@ exchange = ccxt.bybit({
     'enableRateLimit': True, 
     'options': {'defaultType': 'swap'},
 })
-exchange.enable_demo_trading(True) 
+exchange.enable_demo_trading(True) # Force Unified Demo Account
 
 # ── 🔥 STYLISH TERMINAL LOGS 🔥 ──
 def stylish_log(action_type, symbol, message):
@@ -100,9 +99,10 @@ async def update_exchange_sl(symbol, new_sl):
 
 # ── 🔥 TRADE EXECUTION ENGINE 🔥 ──
 async def handle_signal_entry(data):
-    action = data.get('action') 
+    action = data.get('action') # "buy" or "sell"
     raw_ticker = data.get('ticker', '')
     
+    # Format ticker cleanly for ccxt (Removes BYBIT: prefix and .P suffix)
     clean_ticker = raw_ticker.split(':')[-1] 
     clean_ticker = clean_ticker.replace('.P', '').replace('USDT', '')
     symbol = f"{clean_ticker}/USDT:USDT"
@@ -124,18 +124,7 @@ async def handle_signal_entry(data):
         sl_dist = abs(entry_price - sl)
         if sl_dist == 0: return
 
-        # 🛡️ MINIMUM STOP LOSS DISTANCE FILTER
-        min_allowed_dist = entry_price * MIN_SL_PCT
-        if sl_dist < min_allowed_dist:
-            stylish_log("PROTECT", symbol, f"Signal skipped. SL distance ({sl_dist:.4f}) is under 0.3% threshold ({min_allowed_dist:.4f}). Preventing fee bleed.")
-            skip_msg = f"⚠️ <b>SIGNAL REJECTED: {symbol}</b>\n" \
-                       f"<b>Reason:</b> Micro Stop Loss Detected 🛑\n" \
-                       f"<b>Current SL Dist:</b> {sl_dist:.4f}\n" \
-                       f"<b>Minimum Allowed:</b> {min_allowed_dist:.4f} (0.3% of entry)\n" \
-                       f"<i>Action: Skipped execution to block massive position sizing and extreme exchange taker fees.</i>"
-            await send_telegram(skip_msg)
-            return
-
+        # Dynamic contract sizing calculation based on fixed risk per trade configuration
         size = BASE_RISK_PER_TRADE / sl_dist
         f_size = float(exchange.amount_to_precision(symbol, size))
         f_sl = str(float(exchange.price_to_precision(symbol, sl)))
@@ -151,22 +140,20 @@ async def handle_signal_entry(data):
         
         open_positions[symbol] = {
             'direction': direction, 'entry': entry_price, 'qty': f_size,
-            'sl_dist': sl_dist, 'sl': sl, 'current_sl': sl, 'be_px': entry_price,
+            'sl_dist': sl_dist, 'sl': sl, 'be_px': entry_price,
             'tp1': tp1, 'tp2': tp2, 'tp3': tp3
         }
 
+        # Vertical Telegram Message formatting
         icon = "🎯 🟢 LONG" if direction == "LONG" else "🎯 🔴 SHORT"
-        msg = f"<b>🚀 POSITION OPENED: {symbol}</b>\n" \
-              f"<b>Direction:</b> {icon}\n" \
-              f"<b>Order Size:</b> {f_size} Contracts\n" \
-              f"<b>Entry Price:</b> {entry_price:.4f}\n" \
-              f"───────────────────\n" \
-              f"<b>🚨 Initial SL:</b> {sl:.4f} ({(sl_dist/entry_price)*100:.2f}%)\n" \
-              f"<b>🎯 Target TP1 (1R):</b> {tp1:.4f}\n" \
-              f"<b>🎯 Target TP2 (2R):</b> {tp2:.4f}\n" \
-              f"<b>🎯 Target TP3 (3R):</b> {tp3:.4f}\n" \
-              f"───────────────────\n" \
-              f"<b>🛡 shrink Strategy Rule:</b> SL automatically shifts to entry upon securing TP1."
+        msg = f"<b>{icon}:</b> {symbol}\n" \
+              f"<b>Type:</b> ⚡ Market Execution (24/7)\n" \
+              f"<b>Entry:</b> {entry_price:.4f}\n" \
+              f"<b>SL:</b> {sl:.4f}\n" \
+              f"<b>TP (1R):</b> {tp1:.4f}\n" \
+              f"<b>TP (2R):</b> {tp2:.4f}\n" \
+              f"<b>TP (3R):</b> {tp3:.4f}\n" \
+              f"<b>Management:</b> SL trails to BE after TP1, to TP1 after TP2."
         await send_telegram(msg)
 
     except Exception as e:
@@ -177,6 +164,7 @@ async def handle_management_event(data):
     event = data.get('event')
     raw_ticker = data.get('ticker', '')
     
+    # Format ticker cleanly for ccxt
     clean_ticker = raw_ticker.split(':')[-1] 
     clean_ticker = clean_ticker.replace('.P', '').replace('USDT', '')
     symbol = f"{clean_ticker}/USDT:USDT"
@@ -188,57 +176,34 @@ async def handle_management_event(data):
 
     if event == "tp1_hit":
         stylish_log("MANAGING", symbol, "Indicator confirmed TP1 hit. Protecting capital via Breakeven.")
-        success = await update_exchange_sl(symbol, pos['entry'])
-        if success:
-            pos['current_sl'] = pos['entry'] 
-        msg = f"🛡️ <b>RISK UPDATE: {symbol}</b>\n" \
-              f"<b>Event Triggered:</b> 🎯 TP1 Reached (1R Locked)\n" \
-              f"<b>Action Executed:</b> Stop Loss shifted to entry level (<b>{pos['entry']:.4f}</b>).\n" \
-              f"<b>Current Risk Status:</b> Risk-Free Trade ✅"
+        await update_exchange_sl(symbol, pos['entry'])
+        msg = f"🛡️ <b>UPDATE: {symbol}</b>\n" \
+              f"<b>Event:</b> 🎯 TP1 Hit (1R Secured)\n" \
+              f"<b>Action:</b> SL moved to Breakeven"
         await send_telegram(msg)
 
     elif event == "tp2_hit":
         stylish_log("MANAGING", symbol, "Indicator confirmed TP2 hit. Securing profits at TP1.")
-        success = await update_exchange_sl(symbol, pos['tp1'])
-        if success:
-            pos['current_sl'] = pos['tp1'] 
-        msg = f"🛡️ <b>RISK UPDATE: {symbol}</b>\n" \
-              f"<b>Event Triggered:</b> 🎯 TP2 Reached (2R Secured)\n" \
-              f"<b>Action Executed:</b> Stop Loss trailed to take-profit 1 level (<b>{pos['tp1']:.4f}</b>).\n" \
-              f"<b>Current Risk Status:</b> +1.00R Profit Guaranteed 🔒"
+        await update_exchange_sl(symbol, pos['tp1'])
+        msg = f"🛡️ <b>UPDATE: {symbol}</b>\n" \
+              f"<b>Event:</b> 🎯 TP2 Hit (2R Secured)\n" \
+              f"<b>Action:</b> SL trailed to TP1"
         await send_telegram(msg)
 
-    elif event in ["tp3_hit", "sl_hit", "be_hit"]:
-        if event == "tp3_hit":
-            event_name = "TP3 Hit (Full Take Profit)"
-            pnl_multiplier = 3.0
-            icon = "🏆"
-        elif pos['current_sl'] == pos['entry'] or event == "be_hit":
-            event_name = "Breakeven Hit (Capital Protected)"
-            pnl_multiplier = 0.0
-            icon = "🛡️"
-        elif pos['current_sl'] == pos['tp1']:
-            event_name = "Trailed Stop Hit (Partial Take Profit)"
-            pnl_multiplier = 1.0
-            icon = "💰"
-        else:
-            event_name = "Initial Stop Loss Hit"
-            pnl_multiplier = -1.0
-            icon = "🛑"
-
-        stylish_log("CLOSED", symbol, f"Trade completed via event: {event_name}")
+    elif event in ["tp3_hit", "sl_hit"]:
+        status = "PROFIT TARGET THREE SECURED" if event == "tp3_hit" else "STOP LOSS HIT"
+        stylish_log("CLOSED", symbol, f"Trade completed via event: {event}")
         
+        pnl_multiplier = 3.0 if event == "tp3_hit" else -1.0
         trade_pnl = pnl_multiplier * BASE_RISK_PER_TRADE
         daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl
         save_daily_pnl()
         
+        icon = "🏆" if event == "tp3_hit" else "🛑"
+        event_name = "TP3 Hit (Full Profit)" if event == "tp3_hit" else "SL Hit"
         msg = f"{icon} <b>POSITION CLOSED: {symbol}</b>\n" \
-              f"<b>Reason for Exit:</b> {event_name}\n" \
-              f"<b>Exit Parameter:</b> {pos['current_sl']:.4f}\n" \
-              f"───────────────────\n" \
-              f"<b>Realized Return:</b> {pnl_multiplier:+.2f}R\n" \
-              f"<b>Net Dollar Impact:</b> {trade_pnl:+.2f} USD\n" \
-              f"<b>Accumulated Daily PnL:</b> {daily_pnl_tracker[date.today()]:+.2f} USD"
+              f"<b>Event:</b> {event_name}\n" \
+              f"<b>Realized PnL:</b> {pnl_multiplier:+.2f}R"
         await send_telegram(msg)
         
         open_positions.pop(symbol, None)
@@ -289,6 +254,7 @@ async def main():
     load_daily_pnl()
     stylish_log("SYSTEM", "STARTUP", "Initializing standalone webhook routing server...")
     
+    # Configure lightweight asynchronous web server
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
     app.router.add_get('/', health_check)
@@ -302,6 +268,7 @@ async def main():
     stylish_log("SYSTEM", "STARTUP", f"Web server successfully bound to port {port}")
     await send_telegram("🎯 <b>Precision Webhook Bot Online</b>\nListening for incoming TradingView signals 24/7.")
     
+    # Keep server running alongside background protection tasks
     await equity_protection_loop()
 
 if __name__ == '__main__':
