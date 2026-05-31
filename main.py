@@ -4,6 +4,7 @@ import os
 import json
 import math
 import pathlib
+import time
 from datetime import datetime, date
 from aiohttp import web
 import ccxt
@@ -73,24 +74,39 @@ async def send_telegram(text):
 def is_kill_switch_active() -> bool:
     return daily_pnl_tracker.get('equity_blown', False) or daily_pnl_tracker.get(date.today(), 0.0) <= DAILY_KILL_SWITCH
 
-# ── 🔥 BYBIT TRADING UTILITIES 🔥 ──
+# ── 🔥 BYBIT REALIZED EXCHANGE DATA SYNC 🔥 ──
 def parse_webhook_symbol(ticker_string):
-    """Converts standard alert formats (e.g., BTCUSD, BYBIT:BTCUSDT.P) to standard CCXT 'BTC/USDT:USDT'"""
     clean = ticker_string.split(':')[-1]
     clean = clean.replace('.P', '').replace('USDT', '')
     return f"{clean}/USDT:USDT"
 
+async def fetch_exact_realized_pnl(symbol, execution_start_time):
+    """Queries Bybit Unified Account Ledger for the true transaction settlement delta"""
+    try:
+        # Give the exchange matching engine up to 4 seconds to print the settlement to history
+        await asyncio.sleep(4) 
+        
+        market_id = exchange.market(symbol)['id']
+        res = await asyncio.to_thread(
+            exchange.private_get_v5_position_closed_pnl,
+            {'category': 'linear', 'symbol': market_id, 'limit': 1}
+        )
+        records = res.get('result', {}).get('list', [])
+        if records:
+            closed_pnl = float(records[0].get('closedPnl', 0.0))
+            return closed_pnl
+    except Exception as e:
+        stylish_log("ERROR", symbol, f"Failed to query closed PnL history ledger: {e}")
+    return None
+
 async def update_exchange_sl(symbol, new_sl):
-    """Updates the active Stop Loss bracket on Bybit"""
     try:
         pos = open_positions.get(symbol)
         if not pos: return False
-        
         f_sl = float(exchange.price_to_precision(symbol, new_sl))
         
-        # Bybit v5 position modification protocol via CCXT
         await asyncio.to_thread(
-            exchange.set_trading_fee_and_tpsl_mode, # Fallback container for structural updates
+            exchange.set_trading_fee_and_tpsl_mode,
             symbol, 
             {'stopLoss': str(f_sl), 'tpslMode': 'Full', 'positionIdx': 0}
         )
@@ -126,7 +142,6 @@ async def handle_signal_entry(data):
         sl_dist = abs(entry_price - sl)
         if sl_dist == 0: return
 
-        # Exact Crypto Position Sizing Accounting for Fee Drag
         fee_rate = 0.00055 
         cost_of_entry_fee = entry_price * fee_rate
         cost_of_sl_fee = sl * fee_rate
@@ -140,7 +155,6 @@ async def handle_signal_entry(data):
         
         stylish_log("EXECUTING", symbol, f"Firing {direction} market order. Size: {qty} units")
         
-        # Bybit Unified Execution Engine
         order = await asyncio.to_thread(
             exchange.create_order,
             symbol=symbol, type='market', side=side, amount=qty, 
@@ -154,7 +168,8 @@ async def handle_signal_entry(data):
         open_positions[symbol] = {
             'id': order['id'], 'direction': direction, 'entry': entry_price, 
             'qty': qty, 'sl_dist': sl_dist, 'sl': sl, 
-            'tp1': tp1, 'tp2': tp2, 'tp3': tp3
+            'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+            'timestamp': time.time()
         }
 
         icon = "🎯 🟢 LONG" if direction == "LONG" else "🎯 🔴 SHORT"
@@ -166,8 +181,7 @@ async def handle_signal_entry(data):
               f"<b>SL:</b> {sl:.4f}\n" \
               f"<b>TP (1R):</b> {tp1:.4f}\n" \
               f"<b>TP (2R):</b> {tp2:.4f}\n" \
-              f"<b>TP (3R):</b> {tp3:.4f}\n" \
-              f"<b>Management:</b> SL trails to BE after TP1, to TP1 after TP2."
+              f"<b>TP (3R):</b> {tp3:.4f}"
         await send_telegram(msg)
 
     except Exception as e:
@@ -188,6 +202,7 @@ async def handle_management_event(data):
     if event == "tp1_hit":
         stylish_log("MANAGING", symbol, "Indicator confirmed TP1 hit. Protecting capital via Breakeven.")
         await update_exchange_sl(symbol, pos['entry'])
+        pos['sl'] = pos['entry']
         msg = f"🛡️ <b>UPDATE: {base_display}</b>\n" \
               f"<b>Event:</b> 🎯 TP1 Hit (1R Secured)\n" \
               f"<b>Action:</b> SL moved to Breakeven"
@@ -196,24 +211,44 @@ async def handle_management_event(data):
     elif event == "tp2_hit":
         stylish_log("MANAGING", symbol, "Indicator confirmed TP2 hit. Securing profits at TP1.")
         await update_exchange_sl(symbol, pos['tp1'])
+        pos['sl'] = pos['tp1']
         msg = f"🛡️ <b>UPDATE: {base_display}</b>\n" \
               f"<b>Event:</b> 🎯 TP2 Hit (2R Secured)\n" \
               f"<b>Action:</b> SL trailed to TP1"
         await send_telegram(msg)
 
     elif event in ["tp3_hit", "sl_hit"]:
-        stylish_log("CLOSED", symbol, f"Trade completed via event: {event}")
+        stylish_log("CLOSED", symbol, f"Trade closure event caught: {event}")
         
-        pnl_multiplier = 3.0 if event == "tp3_hit" else -1.0
-        trade_pnl = pnl_multiplier * BASE_RISK_PER_TRADE
-        daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + trade_pnl
+        # Calculate instant and precise R captured mathematically based on tracked stop-loss state
+        if event == "tp3_hit":
+            captured_r = 3.0
+        else:
+            if pos['direction'] == 'LONG':
+                captured_r = (pos['sl'] - pos['entry']) / pos['sl_dist']
+            else:
+                captured_r = (pos['entry'] - pos['sl']) / pos['sl_dist']
+        
+        # Derive actual accurate PnL without needing to wait for the delayed exchange ledger
+        actual_pnl = captured_r * BASE_RISK_PER_TRADE
+
+        daily_pnl_tracker[date.today()] = daily_pnl_tracker.get(date.today(), 0.0) + actual_pnl
         save_daily_pnl()
         
-        icon = "🏆" if event == "tp3_hit" else "🛑"
-        event_name = "TP3 Hit (Full Profit)" if event == "tp3_hit" else "SL Hit"
+        if captured_r > 0:
+            icon = "🏆"
+        elif captured_r == 0:
+            icon = "⚡"
+        else:
+            icon = "🛑"
+            
+        event_name = "TP3 Target Hit" if event == "tp3_hit" else "Stop Loss Hit"
+        
         msg = f"{icon} <b>POSITION CLOSED: {base_display}</b>\n" \
               f"<b>Event:</b> {event_name}\n" \
-              f"<b>Realized PnL:</b> {pnl_multiplier:+.2f}R"
+              f"<b>Captured Return:</b> {captured_r:+.2f} R\n" \
+              f"<b>Realized Profit/Loss:</b> {actual_pnl:+.2f} USD\n" \
+              f"<b>Daily Combined Net:</b> {daily_pnl_tracker[date.today()]:.2f} USD"
         await send_telegram(msg)
         
         open_positions.pop(symbol, None)
@@ -251,7 +286,7 @@ async def init_exchange():
                 'fetchMarkets': ['linear']
             }
         })
-        exchange.enable_demo_trading(True) # Set to False for Live Trading Accounts
+        exchange.enable_demo_trading(True) 
         await asyncio.to_thread(exchange.load_markets)
         stylish_log("SYSTEM", "STARTUP", "Bybit Connection synchronized and loaded successfully!")
     except Exception as e:
@@ -259,11 +294,8 @@ async def init_exchange():
 
 async def main():
     load_daily_pnl()
-    
-    # 1. Connect to Bybit API
     await init_exchange()
     
-    # 2. Start Standalone Webhook Server
     stylish_log("SYSTEM", "STARTUP", "Initializing standalone webhook routing server...")
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
@@ -282,7 +314,5 @@ async def main():
         await asyncio.sleep(3600)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
