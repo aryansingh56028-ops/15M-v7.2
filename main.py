@@ -103,12 +103,20 @@ async def update_exchange_sl(symbol, new_sl):
     try:
         pos = open_positions.get(symbol)
         if not pos: return False
-        f_sl = float(exchange.price_to_precision(symbol, new_sl))
         
+        f_sl = float(exchange.price_to_precision(symbol, new_sl))
+        market_id = exchange.market_id(symbol) # Converts 'PORTAL/USDT:USDT' to Bybit's required 'PORTALUSDT'
+        
+        # Using the correct Bybit V5 native endpoint
         await asyncio.to_thread(
-            exchange.set_trading_fee_and_tpsl_mode,
-            symbol, 
-            {'stopLoss': str(f_sl), 'tpslMode': 'Full', 'positionIdx': 0}
+            exchange.private_post_v5_position_trading_stop,
+            {
+                'category': 'linear',
+                'symbol': market_id,
+                'stopLoss': str(f_sl),
+                'tpslMode': 'Full',
+                'positionIdx': 0 
+            }
         )
         return True
     except Exception as e:
@@ -201,21 +209,31 @@ async def handle_management_event(data):
 
     if event == "tp1_hit":
         stylish_log("MANAGING", symbol, "Indicator confirmed TP1 hit. Protecting capital via Breakeven.")
-        await update_exchange_sl(symbol, pos['entry'])
-        pos['sl'] = pos['entry']
-        msg = f"🛡️ <b>UPDATE: {base_display}</b>\n" \
-              f"<b>Event:</b> 🎯 TP1 Hit (1R Secured)\n" \
-              f"<b>Action:</b> SL moved to Breakeven"
-        await send_telegram(msg)
+        
+        # Wait to see if Bybit actually accepted the new SL
+        success = await update_exchange_sl(symbol, pos['entry'])
+        if success:
+            pos['sl'] = pos['entry']
+            msg = f"🛡️ <b>UPDATE: {base_display}</b>\n" \
+                  f"<b>Event:</b> 🎯 TP1 Hit (1R Secured)\n" \
+                  f"<b>Action:</b> SL moved to Breakeven"
+            await send_telegram(msg)
+        else:
+            await send_telegram(f"❌ <b>SYSTEM ERROR: {base_display}</b>\nFailed to move SL to Breakeven on Bybit!")
 
     elif event == "tp2_hit":
         stylish_log("MANAGING", symbol, "Indicator confirmed TP2 hit. Securing profits at TP1.")
-        await update_exchange_sl(symbol, pos['tp1'])
-        pos['sl'] = pos['tp1']
-        msg = f"🛡️ <b>UPDATE: {base_display}</b>\n" \
-              f"<b>Event:</b> 🎯 TP2 Hit (2R Secured)\n" \
-              f"<b>Action:</b> SL trailed to TP1"
-        await send_telegram(msg)
+        
+        # Wait to see if Bybit actually accepted the new SL
+        success = await update_exchange_sl(symbol, pos['tp1'])
+        if success:
+            pos['sl'] = pos['tp1']
+            msg = f"🛡️ <b>UPDATE: {base_display}</b>\n" \
+                  f"<b>Event:</b> 🎯 TP2 Hit (2R Secured)\n" \
+                  f"<b>Action:</b> SL trailed to TP1"
+            await send_telegram(msg)
+        else:
+            await send_telegram(f"❌ <b>SYSTEM ERROR: {base_display}</b>\nFailed to trail SL to TP1 on Bybit!")
 
     elif event in ["tp3_hit", "sl_hit"]:
         stylish_log("CLOSED", symbol, f"Trade closure event caught: {event}")
