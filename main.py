@@ -24,6 +24,7 @@ BYBIT_API_KEY      = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET   = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
+PUBLIC_URL         = os.getenv("PUBLIC_URL") or os.getenv("RAILWAY_STATIC_URL")
 
 # 🛡️ Risk Management
 DAILY_KILL_SWITCH   = -80.0   
@@ -36,7 +37,7 @@ exchange = None
 # ── 🔥 STYLISH TERMINAL LOGS 🔥 ──
 def stylish_log(action_type, symbol, message):
     now = datetime.now().strftime("%H:%M:%S")
-    icons = {"WEBHOOK": "🌐", "EXECUTING": "⚡", "MANAGING": "🛡️", "CLOSED": "💰", "ERROR": "❌", "PROTECT": "🛑", "SYSTEM": "🔹"}
+    icons = {"WEBHOOK": "🌐", "EXECUTING": "⚡", "MANAGING": "🛡️", "CLOSED": "💰", "ERROR": "❌", "PROTECT": "🛑", "SYSTEM": "🔹", "WARNING": "⚠️"}
     icon = icons.get(action_type, "🔹")
     clean_sym = symbol.split(':')[0] if symbol else "SYSTEM"
     print(f"[{now}] [{icon} {action_type.ljust(10)}] | {clean_sym.ljust(10)} | {message}", flush=True)
@@ -238,6 +239,40 @@ async def handle_webhook(request):
 async def health_check(request):
     return web.Response(text="200 OK - APEX BYBIT ALIVE")
 
+# ── 🔥 24/7 HEARTBEAT ACTIVATOR 🔥 ──
+async def heartbeat_loop():
+    """Background loop that executes every 2 minutes to maintain runtime activity."""
+    await asyncio.sleep(30) # Grace period for initialization
+    stylish_log("SYSTEM", "HEARTBEAT", "Continuous monitoring routine successfully established. Pinging every 2 mins.")
+    
+    while True:
+        try:
+            stylish_log("SYSTEM", "HEARTBEAT", "Verifying application layer and network status...")
+            
+            if PUBLIC_URL:
+                # Ensure the URL has https:// and ends with a slash
+                url = PUBLIC_URL.strip()
+                if not url.startswith("http://") and not url.startswith("https://"):
+                    url = f"https://{url}"
+                url = url.rstrip('/') + '/'
+
+                # VISUAL CONFIRMATION: Prints the corrected URL before attempting the ping
+                stylish_log("SYSTEM", "HEARTBEAT", f"Attempting to ping -> {url}")
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=10) as response:
+                        if response.status == 200:
+                            stylish_log("SYSTEM", "HEARTBEAT", f"Self-ping successful! App is awake.")
+                        else:
+                            stylish_log("SYSTEM", "HEARTBEAT", f"Self-ping warning. Code: {response.status}")
+            else:
+                stylish_log("SYSTEM", "HEARTBEAT", "Active: Missing PUBLIC_URL variable for network self-pings.")
+                
+        except Exception as e:
+            stylish_log("ERROR", "HEARTBEAT", f"Encountered friction in ping cycle: {e}")
+            
+        await asyncio.sleep(120) # Sleep for 2 minutes (120 seconds)
+
 # ── 🔥 BOOT SEQUENCE 🔥 ──
 async def init_exchange():
     global exchange
@@ -274,6 +309,10 @@ async def main():
     
     await site.start()
     stylish_log("SYSTEM", "STARTUP", f"Web server successfully bound to port {port}")
+    
+    # Spin up the Background Heartbeat Service
+    asyncio.create_task(heartbeat_loop())
+    
     await send_telegram("🎯 <b>Apex Bybit Webhook Bot Online</b>\nListening for incoming TradingView signals 24/7.")
     
     while True:
