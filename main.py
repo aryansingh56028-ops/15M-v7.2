@@ -117,39 +117,25 @@ async def handle_signal_entry(data):
     side = 'buy' if direction == 'LONG' else 'sell'
     
     try:
-        # 1. Grab TradingView's theoretical numbers
-        tv_entry = float(data['price'])
-        tv_sl = float(data['sl'])
-        tv_tp3 = float(data['tp3'])
+        entry_price = float(data['price'])
+        sl = float(data['sl'])
+        tp1 = float(data['tp1'])
+        tp2 = float(data['tp2'])
+        tp3 = float(data['tp3'])
         
-        # 2. Calculate TradingView's intended SL distance
-        tv_sl_dist = abs(tv_entry - tv_sl)
-        if tv_sl_dist == 0: return
+        sl_dist = abs(entry_price - sl)
+        if sl_dist == 0: return
 
-        # 3. Fetch the ACTUAL live price from Bybit
-        ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
-        live_price = float(ticker['last'])
-
-        # 4. Shift ONLY the Stop Loss based on live price. Keep TP3 fixed to TV.
-        if direction == 'LONG':
-            actual_sl = live_price - tv_sl_dist
-        else: # SHORT
-            actual_sl = live_price + tv_sl_dist
-            
-        actual_tp3 = tv_tp3 # Hard fixed to TradingView's target
-
-        # 5. Calculate fees and precise size based on LIVE prices
         fee_rate = 0.00055 
-        cost_of_entry_fee = live_price * fee_rate
-        cost_of_sl_fee = actual_sl * fee_rate
-        true_risk_per_coin = tv_sl_dist + cost_of_entry_fee + cost_of_sl_fee
+        cost_of_entry_fee = entry_price * fee_rate
+        cost_of_sl_fee = sl * fee_rate
+        true_risk_per_coin = sl_dist + cost_of_entry_fee + cost_of_sl_fee
         
         raw_qty = BASE_RISK_PER_TRADE / true_risk_per_coin
         qty = float(exchange.amount_to_precision(symbol, raw_qty))
         
-        # 6. Format precise exchange prices
-        f_sl = float(exchange.price_to_precision(symbol, actual_sl))
-        f_tp3 = float(exchange.price_to_precision(symbol, actual_tp3))
+        f_sl = float(exchange.price_to_precision(symbol, sl))
+        f_tp3 = float(exchange.price_to_precision(symbol, tp3))
         
         stylish_log("EXECUTING", symbol, f"Firing {direction} market order. Size: {qty} units")
         
@@ -164,9 +150,9 @@ async def handle_signal_entry(data):
             })
             
         open_positions[symbol] = {
-            'id': order['id'], 'direction': direction, 'entry': live_price, 
-            'qty': qty, 'sl_dist': tv_sl_dist, 'sl': actual_sl, 
-            'tp3': actual_tp3,
+            'id': order['id'], 'direction': direction, 'entry': entry_price, 
+            'qty': qty, 'sl_dist': sl_dist, 'sl': sl, 
+            'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
             'timestamp': time.time()
         }
 
@@ -175,9 +161,11 @@ async def handle_signal_entry(data):
         msg = f"<b>{icon}:</b> {base_display}\n" \
               f"<b>Type:</b> ⚡ Bybit Market Execution\n" \
               f"<b>Quantity:</b> {qty}\n" \
-              f"<b>Live Entry:</b> {live_price:.4f}\n" \
-              f"<b>Adjusted SL:</b> {actual_sl:.4f}\n" \
-              f"<b>Fixed TP:</b> {actual_tp3:.4f}"
+              f"<b>Entry:</b> {entry_price:.4f}\n" \
+              f"<b>SL:</b> {sl:.4f}\n" \
+              f"<b>TP (1R):</b> {tp1:.4f}\n" \
+              f"<b>TP (2R):</b> {tp2:.4f}\n" \
+              f"<b>TP (3R):</b> {tp3:.4f}"
         await send_telegram(msg)
 
     except Exception as e:
